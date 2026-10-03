@@ -162,10 +162,10 @@ body.theme-retro .glass,body.theme-retro .card,body.theme-retro .row,body.theme-
 <script>
 const $=s=>document.querySelector(s),E=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const LS=k=>{try{return JSON.parse(localStorage.getItem('sn_'+k))}catch(e){return null}},SV=(k,v)=>{try{localStorage.setItem('sn_'+k,JSON.stringify(v))}catch(e){}};
-const API={online:false,user:null,authReady:false};
+const API={online:false,user:null,authReady:false,sessionValid:false};
 const apiFetch=async(path,opt={})=>{const r=await fetch(path,{credentials:'include',...opt});let data=null;try{data=await r.json()}catch(_){data=null}if(!r.ok)throw new Error(data?.error||('HTTP '+r.status));return data};
 const apiJson=(path,body)=>apiFetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-const backendReady=()=>API.online&&!!API.user;
+const backendReady=()=>API.online&&!!API.user&&API.sessionValid!==false;
 const cacheAuth=u=>{try{localStorage.setItem(AK,JSON.stringify({user:u,at:Date.now(),server:true}))}catch(e){}};
 let communityTracks=[],communityComments={},communityPlaylists=[];
 async function bootAPI(){
@@ -176,6 +176,7 @@ async function bootAPI(){
     const serverUser=me.user||null;
     const cached=axSes();
     API.user=serverUser;
+    API.sessionValid=!!serverUser;
 
     // The server session is the source of truth. Never let an old local/demo
     // account override the account represented by this browser's cookie.
@@ -187,11 +188,11 @@ async function bootAPI(){
       document.body.classList.remove('noauth');
       render();
     }else if(cached){
-      try{localStorage.removeItem(AK)}catch(e){}
-      document.body.classList.add('noauth');
-      $('#authScreen')?.classList.add('open');
-      axS.r='login';
-      axR();
+      API.user=cached;
+      API.sessionValid=false;
+      $('#authScreen')?.classList.remove('open');
+      document.body.classList.remove('noauth');
+      render();
     }
     API.authReady=true;
     await refreshCommunity();
@@ -532,7 +533,7 @@ function axIn(u,back){
   render();
   toast((back?'Welcome back, ':'Welcome to SONORA, ')+(u.name||u.username));
 }
-function axOut(){au.pause();if(API.online)fetch('/api/auth/logout',{method:'POST',credentials:'include'}).catch(()=>{});API.user=null;try{localStorage.removeItem(AK)}catch(e){}closeMenu();closeQV();fpset(0);document.body.classList.add('noauth');axS.r='login';axR();$('#authScreen').classList.add('open')}
+function axOut(){au.pause();if(API.online)fetch('/api/auth/logout',{method:'POST',credentials:'include'}).catch(()=>{});API.user=null;API.sessionValid=false;try{localStorage.removeItem(AK)}catch(e){}closeMenu();closeQV();fpset(0);document.body.classList.add('noauth');axS.r='login';axR();$('#authScreen').classList.add('open')}
 const axFin=()=>{const u=axS.pu||{id:uid(),name:'Listener',username:'listener',email:'listener@sonora.app'};axS.pu=null;if(axS.sel.artists.length){fol=[...new Set([...fol,...axS.sel.artists])];SV('fol',fol)}axIn(u,0)};
 document.addEventListener('click',e=>{const a=e.target.closest('[data-a]'),d=a&&a.dataset;if(a&&/^(auth|onb)-/.test(d.a)){const k=d.a;if(k==='auth-goto'){axS.r=d.v;axR()}else if(k==='auth-social'){if(d.v==='Google'){window.location.href=new URL('/api/auth/google',window.location.origin).href}else if(d.v==='Apple'){toast('Apple Sign In chưa được cấu hình OAuth trên server')} }else if(k==='onb-pick'){const x=axS.sel[d.k];axS.sel[d.k]=x.includes(d.v)?x.filter(v=>v!==d.v):[...x,d.v];axR()}else if(k==='onb-next'){if(axS.st<3){axS.st++;axR()}else axFin()}else if(k==='onb-back'&&axS.st>0){axS.st--;axR()}return}
 if(e.target.closest('#authBack')){if(axS.r==='onb'&&axS.st>0)axS.st--;else axS.r='login';axR()}else if(e.target.closest('#authSkip'))axFin()});
@@ -551,12 +552,12 @@ document.addEventListener('submit',async e=>{
     setBusy(true);
     if(r==='login'){
       const data=await apiJson('/api/auth/login',{email:V('authEmail').trim(),password:V('authPw')});
-      API.user=data.user;
+      API.user=data.user; API.sessionValid=true;
       axIn(API.user,1);
       toast('Signed in to SONORA Cloud');afterAuth();
     }else if(r==='signup'){
       const data=await apiJson('/api/auth/signup',{name:V('suName').trim(),username:V('suUser').trim().toLowerCase(),email:V('suEmail').trim(),password:V('suPw'),genres:axS.sel.genres,artists:axS.sel.artists,moods:axS.sel.moods});
-      API.user=data.user;
+      API.user=data.user; API.sessionValid=true;
       axIn(API.user,0);
       toast('Account created');afterAuth();
     }else if(r==='forgot'){
@@ -644,7 +645,7 @@ await syncAll();if(AUTO_UPLOAD_LOCAL)await retryUnsynced();pls.forEach(p=>syncPl
 bootLoop();
 async function loadRemote(){try{const r=await apiFetch('/api/tracks?limit=200&sort=popular');for(const s of (r.tracks||[])){const t=serverTrackToLocal(s);if(!B[t.id]){T.push(t);B[t.id]=t}else Object.assign(B[t.id],t)}try{const pr=await apiFetch('/api/playlists');communityPlaylists=pr.playlists||[]}catch(_){}if(view==='home'||view==='disc'||view==='lib')render()}catch(_){}}
 
-addEventListener('resize',draw);$('#bs').style.opacity=.45;if(LS('dens')==='p')document.body.classList.add('cp');applyTheme();applyCS();cxset(cxo);render();rq();
+addEventListener('resize',draw);$('#bs').style.opacity=.45;if(LS('dens')==='p')document.body.classList.add('cp');applyTheme();applyCS();cxset(cxo);try{const mh=String(location.hash||'');if(/^#profile\//i.test(mh)){view='profile';arg='u:'+decodeURIComponent(mh.slice(9));}}catch(_){}render();rq();
 window.__idbReady=idbAll().then(rs=>{rs.forEach(r=>{const t={...r,url:URL.createObjectURL(r.blob),up:1};delete t.blob;delete t.cb;if(r.cb)t.cover=URL.createObjectURL(r.cb);T.push(t);B[t.id]=t});if(rs.length)render()}).then(()=>{const sv=LS('cur');if(sv&&B[sv.id]){q=(sv.q||[]).filter(i=>B[i]);if(!q.includes(sv.id))q=[sv.id];orig=q.slice();load(sv.id,false)}else draw()});
 
 /* ---- v3 additions ---- */
@@ -689,7 +690,8 @@ async function fetchProfile(key){
   const cacheKey=raw||'me';
   if(PROFILE_CACHE[cacheKey])return PROFILE_CACHE[cacheKey];
   if(!API.online){throw new Error('SONORA server is offline — cannot load another profile.');}
-  const candidates=[raw];if(API.user?.id&&raw===String(API.user.username||''))candidates.push(String(API.user.id));
+  const candidates=[raw];
+  if(API.user?.id && raw && raw !== String(API.user.id) && raw.toLowerCase() === String(API.user.username||'').toLowerCase()) candidates.push(String(API.user.id));
   let last;
   for(const c of candidates){try{const r=await apiFetch('/api/users/'+encodeURIComponent(c));const p=r.profile;if(p){PROFILE_CACHE[cacheKey]=p;return p}}catch(err){last=err;}}
   throw last||new Error('Profile not found');
@@ -776,7 +778,7 @@ render=async function(top){
 document.addEventListener('click',async e=>{
   const a=e.target.closest('[data-a]'); if(!a)return; const d=a.dataset;
   try{
-    if(d.a==='profile'){e.preventDefault();e.stopImmediatePropagation();view='profile';arg='u:'+(d.username||d.id||d.profileKey||'');PROFILE_TAB='tracks';await render(1);return}
+    if(d.a==='profile'){e.preventDefault();e.stopImmediatePropagation();view='profile';arg='u:'+(d.id||d.profileKey||d.username||'');PROFILE_TAB='tracks';await render(1);return}
     if(d.a==='profileme'){e.preventDefault();e.stopImmediatePropagation();view='profile';arg='u:'+(API.user?.username||API.user?.id||'');PROFILE_TAB='tracks';await render(1);return}
     if(d.a==='profiletab'){PROFILE_TAB=d.v;await render();return}
     if(d.a==='followuser'){e.stopPropagation();const r=await apiJson('/api/users/'+d.id+'/follow',{});PROFILE_CACHE={};PROFILE_TAB='tracks';await render();toast(r.following?'Followed':'Unfollowed');return}
@@ -784,7 +786,7 @@ document.addEventListener('click',async e=>{
     if(d.a==='profilesave'){await saveProfile();return}
     if(d.a==='profilepick'){const id=d.v==='avatar'?'pfAvatarInput':'pfBgInput';$('#'+id)?.click();return}
     if(d.a==='profileclear'){if(d.v==='avatar')PROFILE_EDIT.avatarData='';else PROFILE_EDIT.backgroundData='';const el=d.v==='avatar'?$('#pfAv'):$('#pfBg');if(el){el.style.backgroundImage='';el.textContent=d.v==='avatar'?'Avatar':'Profile background'}return}
-    if(d.a==='profileShare'){const u=API.user;const url=new URL(location.href);url.hash='profile/'+encodeURIComponent(u?.username||'');await navigator.clipboard?.writeText(url.href);toast('Profile link copied');return}
+    if(d.a==='profileShare'){const u=API.user;const url=new URL(location.href);url.hash='profile/'+encodeURIComponent(u?.id||u?.username||'');await navigator.clipboard?.writeText(url.href);toast('Profile link copied');return}
     if(d.a==='communityPlaylist'){view='pl';arg='c'+d.id;await render(1);return}
   }catch(err){toast(err.message||'Something went wrong')}
 });
