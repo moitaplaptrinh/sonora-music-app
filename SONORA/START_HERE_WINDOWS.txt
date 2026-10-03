@@ -1,0 +1,23 @@
+SONORA SUPER VIP - WINDOWS
+
+1) Install Python 3.11 or newer.
+2) Open this folder.
+3) In the folder, click the address bar, type CMD, press Enter.
+4) Type:
+   python server.py
+5) Open Chrome/Edge:
+   http://127.0.0.1:8787/
+
+NEVER open index.html directly with file://.
+
+GitHub:
+- Create a new repository.
+- Upload all files in this folder.
+- Keep index.html at repository root.
+
+Online app:
+- Deploy the repository to Railway.
+- Start command: python server.py
+- Add Volume mounted at /data
+- Add variable SONORA_DATA_DIR=/data
+- Generate a Railway domain.

@@ -1,0 +1,472 @@
+#!/usr/bin/env python3
+import os, re, json, hmac, hashlib, secrets, sqlite3, mimetypes, urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from datetime import datetime, timezone
+
+ROOT = Path(__file__).resolve().parent
+DATA_DIR = Path(os.environ.get('SONORA_DATA_DIR', str(ROOT / 'data'))).resolve()
+UPLOAD_DIR = DATA_DIR / 'uploads'
+DB_PATH = DATA_DIR / 'sonora.db'
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+PORT = int(os.environ.get('PORT', '8787'))
+HOST = os.environ.get('HOST', '0.0.0.0')
+COOKIE_SECURE = os.environ.get('COOKIE_SECURE', '0') == '1'
+MAX_UPLOAD = int(os.environ.get('MAX_UPLOAD_BYTES', str(160 * 1024 * 1024)))
+
+DB_LOCK = __import__('threading').RLock()
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+def db():
+    c = sqlite3.connect(DB_PATH, check_same_thread=False)
+    c.row_factory = sqlite3.Row
+    c.execute('PRAGMA journal_mode=WAL')
+    c.execute('PRAGMA foreign_keys=ON')
+    return c
+
+def init_db():
+    with DB_LOCK:
+        c = db()
+        c.executescript('''
+        CREATE TABLE IF NOT EXISTS users(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          username TEXT NOT NULL UNIQUE,
+          email TEXT NOT NULL UNIQUE,
+          password_hash TEXT NOT NULL,
+          password_salt TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sessions(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          token_hash TEXT NOT NULL UNIQUE,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS tracks(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          title TEXT NOT NULL,
+          artist TEXT NOT NULL,
+          album TEXT DEFAULT '',
+          genre TEXT DEFAULT '',
+          tags TEXT DEFAULT '',
+          visibility TEXT NOT NULL DEFAULT 'Public',
+          explicit INTEGER NOT NULL DEFAULT 0,
+          filename TEXT NOT NULL,
+          mime TEXT NOT NULL DEFAULT 'application/octet-stream',
+          size_bytes INTEGER NOT NULL DEFAULT 0,
+          duration REAL NOT NULL DEFAULT 0,
+          play_count INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS playlists(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          artist TEXT DEFAULT '',
+          description TEXT DEFAULT '',
+          visibility TEXT NOT NULL DEFAULT 'Public',
+          cover_url TEXT DEFAULT '',
+          background_url TEXT DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS playlist_tracks(
+          playlist_id INTEGER NOT NULL,
+          track_id INTEGER NOT NULL,
+          position INTEGER NOT NULL,
+          PRIMARY KEY(playlist_id, track_id),
+          FOREIGN KEY(playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
+          FOREIGN KEY(track_id) REFERENCES tracks(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS comments(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          track_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL,
+          text TEXT NOT NULL,
+          position REAL NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(track_id) REFERENCES tracks(id) ON DELETE CASCADE,
+          FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS messages(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sender_id INTEGER NOT NULL,
+          recipient_id INTEGER NOT NULL,
+          body TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          read_at TEXT,
+          FOREIGN KEY(sender_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY(recipient_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS notifications(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          type TEXT NOT NULL,
+          title TEXT NOT NULL,
+          body TEXT DEFAULT '',
+          created_at TEXT NOT NULL,
+          read_at TEXT,
+          FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_tracks_visibility ON tracks(visibility, created_at);
+        CREATE INDEX IF NOT EXISTS idx_comments_track ON comments(track_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at);
+        ''')
+        c.commit(); c.close()
+
+def scrypt_hash(password, salt=None):
+    salt_b = salt.encode() if salt else secrets.token_bytes(16)
+    key = hashlib.scrypt(password.encode(), salt=salt_b, n=2**14, r=8, p=1, dklen=64)
+    return key.hex(), salt_b.hex()
+
+def check_password(password, digest, salt_hex):
+    key = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt_hex), n=2**14, r=8, p=1, dklen=64)
+    return hmac.compare_digest(key.hex(), digest)
+
+def public_user(row):
+    return {'id': row['id'], 'name': row['name'], 'username': row['username'], 'email': row['email'], 'createdAt': row['created_at']}
+
+def token_hash(token):
+    return hashlib.sha256(token.encode()).hexdigest()
+
+def get_user_from_handler(h):
+    cookie = h.headers.get('Cookie','')
+    token = None
+    for item in cookie.split(';'):
+        item=item.strip()
+        if item.startswith('sonora_session='):
+            token = item.split('=',1)[1]
+    if not token:
+        return None
+    with DB_LOCK:
+        c=db(); row=c.execute('SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?',(token_hash(token),now_iso())).fetchone(); c.close()
+    return public_user(row) if row else None
+
+def require_user(h):
+    u=get_user_from_handler(h)
+    if not u:
+        h.json(401, {'error':'Authentication required'})
+        return None
+    return u
+
+def safe_name(name):
+    name = os.path.basename(name or 'audio.bin')
+    stem = re.sub(r'[^A-Za-z0-9._-]+','_', name).strip('._') or 'audio'
+    return stem[:140]
+
+def track_json(r, base=''):
+    return {
+      'id': r['id'], 'serverId': r['id'], 'title': r['title'], 'artist': r['artist'], 'album': r['album'],
+      'genre': r['genre'], 'tags': r['tags'], 'visibility': r['visibility'], 'explicit': bool(r['explicit']),
+      'duration': r['duration'], 'playCount': r['play_count'], 'commentCount': r['comment_count'] if 'comment_count' in r.keys() else 0,
+      'createdAt': r['created_at'], 'streamUrl': f'{base}/api/tracks/{r["id"]}/stream', 'coverUrl': '', 'peaks': []
+    }
+
+def playlist_json(c, r, base=''):
+    tr = c.execute('SELECT track_id FROM playlist_tracks WHERE playlist_id=? ORDER BY position',(r['id'],)).fetchall()
+    return {
+      'id': r['id'], 'name': r['name'], 'artist': r['artist'], 'description': r['description'],
+      'visibility': r['visibility'], 'public': r['visibility']=='Public', 'coverUrl': r['cover_url'],
+      'backgroundUrl': r['background_url'], 'trackIds':[x['track_id'] for x in tr], 'createdAt':r['created_at'], 'updatedAt':r['updated_at'],
+      'owner': {'id':r['user_id']} if r['user_id'] else None
+    }
+
+class H(BaseHTTPRequestHandler):
+    server_version = 'SONORA/1.0'
+    def log_message(self, fmt, *args):
+        print('%s - %s' % (self.address_string(), fmt % args))
+    def json(self, status, data, extra_headers=None):
+        raw=json.dumps(data, ensure_ascii=False).encode()
+        self.send_response(status); self.send_header('Content-Type','application/json; charset=utf-8'); self.send_header('Content-Length',str(len(raw))); self.send_header('Cache-Control','no-store')
+        if extra_headers:
+            for k,v in extra_headers.items(): self.send_header(k,v)
+        self.end_headers(); self.wfile.write(raw)
+    def text(self,status,body,ctype='text/plain; charset=utf-8'):
+        raw=body.encode(); self.send_response(status); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(len(raw))); self.end_headers(); self.wfile.write(raw)
+    def read_body(self):
+        n=int(self.headers.get('Content-Length','0') or 0)
+        if n>MAX_UPLOAD: raise ValueError('Request too large')
+        return self.rfile.read(n)
+    def parse_json(self):
+        try: return json.loads(self.read_body() or b'{}')
+        except Exception: raise ValueError('Invalid JSON')
+    def multipart(self):
+        ct=self.headers.get('Content-Type','')
+        m=re.search(r'boundary=(?:"([^"]+)"|([^;]+))',ct)
+        if not m: raise ValueError('Invalid multipart boundary')
+        boundary=(m.group(1) or m.group(2)).encode()
+        body=self.read_body(); out={}; files={}
+        for part in body.split(b'--'+boundary):
+            if not part or part in (b'--',b'--\r\n'): continue
+            part=part.strip(b'\r\n')
+            if b'\r\n\r\n' not in part: continue
+            hb,data=part.split(b'\r\n\r\n',1)
+            headers={}
+            for line in hb.decode('latin1','ignore').split('\r\n'):
+                if ':' in line:
+                    k,v=line.split(':',1); headers[k.lower()]=v.strip()
+            disp=headers.get('content-disposition','')
+            nm=re.search(r'name="([^"]+)"',disp); fn=re.search(r'filename="([^"]*)"',disp)
+            if not nm: continue
+            name=nm.group(1); data=data.rstrip(b'\r\n')
+            if fn:
+                files[name]={'filename':fn.group(1),'content_type':headers.get('content-type','application/octet-stream'),'data':data}
+            else:
+                out[name]=data.decode('utf-8','ignore')
+        return out,files
+    def set_cookie(self, token, max_age=2592000):
+        secure='; Secure' if COOKIE_SECURE else ''
+        return {'Set-Cookie':f'sonora_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}'}
+    def clear_cookie(self): return {'Set-Cookie':'sonora_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'}
+
+    def do_GET(self):
+        try: self.route('GET')
+        except ValueError as e: self.json(400,{'error':str(e)})
+        except BrokenPipeError: pass
+        except Exception as e: print('GET error',repr(e)); self.json(500,{'error':'Internal server error'})
+    def do_POST(self):
+        try: self.route('POST')
+        except ValueError as e: self.json(400,{'error':str(e)})
+        except BrokenPipeError: pass
+        except Exception as e: print('POST error',repr(e)); self.json(500,{'error':'Internal server error'})
+    def do_PATCH(self):
+        try: self.route('PATCH')
+        except ValueError as e: self.json(400,{'error':str(e)})
+        except Exception as e: print('PATCH error',repr(e)); self.json(500,{'error':'Internal server error'})
+    def do_OPTIONS(self):
+        self.send_response(204); self.send_header('Access-Control-Allow-Origin',self.headers.get('Origin','*')); self.send_header('Access-Control-Allow-Credentials','true'); self.send_header('Access-Control-Allow-Headers','Content-Type'); self.send_header('Access-Control-Allow-Methods','GET,POST,PATCH,OPTIONS'); self.end_headers()
+    def route(self,method):
+        p=urllib.parse.urlparse(self.path); path=p.path; q=urllib.parse.parse_qs(p.query)
+        if path=='/': return self.serve_file(ROOT/'index.html')
+        if path=='/favicon.ico': return self.text(204,'')
+        if path=='/api/health': return self.json(200,{'ok':True,'service':'sonora','time':now_iso()})
+        if path=='/api/me':
+            u=get_user_from_handler(self); return self.json(200,{'user':u})
+        if path=='/api/auth/signup' and method=='POST': return self.signup()
+        if path=='/api/auth/login' and method=='POST': return self.login()
+        if path=='/api/auth/logout' and method=='POST':
+            cookie=self.headers.get('Cookie',''); token=None
+            for x in cookie.split(';'):
+                x=x.strip()
+                if x.startswith('sonora_session='): token=x.split('=',1)[1]
+            if token:
+                with DB_LOCK: c=db(); c.execute('DELETE FROM sessions WHERE token_hash=?',(token_hash(token),)); c.commit(); c.close()
+            return self.json(200,{'ok':True},self.clear_cookie())
+        if path=='/api/auth/forgot-password' and method=='POST':
+            data=self.parse_json(); email=str(data.get('email','')).strip().lower()
+            if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$',email): return self.json(400,{'ok':False,'error':'Invalid email'})
+            return self.json(200,{'ok':True,'message':'Reset email service is not configured in this starter build.'})
+        if path=='/api/recommendations' and method=='GET': return self.tracks()
+        if path=='/api/tracks' and method=='GET': return self.tracks()
+        if path=='/api/tracks' and method=='POST': return self.upload_track()
+        m=re.match(r'^/api/tracks/(\d+)/stream$',path)
+        if m and method=='GET': return self.stream_track(int(m.group(1)))
+        m=re.match(r'^/api/tracks/(\d+)/play$',path)
+        if m and method=='POST': return self.play_track(int(m.group(1)))
+        m=re.match(r'^/api/tracks/(\d+)/comments$',path)
+        if m and method=='GET': return self.get_comments(int(m.group(1)))
+        if m and method=='POST': return self.add_comment(int(m.group(1)))
+        if path=='/api/playlists' and method=='GET': return self.get_playlists()
+        if path=='/api/playlists' and method=='POST': return self.create_playlist()
+        m=re.match(r'^/api/playlists/(\d+)$',path)
+        if m and method=='PATCH': return self.patch_playlist(int(m.group(1)))
+        if path=='/api/messages' and method=='GET': return self.get_messages()
+        if path=='/api/messages' and method=='POST': return self.send_message()
+        if path=='/api/notifications' and method=='GET': return self.get_notifications()
+        if path.startswith('/uploads/'):
+            name=Path(path.split('/uploads/',1)[1]).name
+            return self.serve_file(UPLOAD_DIR/name)
+        self.serve_file(ROOT/'index.html') if not path.startswith('/api/') else self.json(404,{'error':'Not found'})
+
+    def serve_file(self,path):
+        if not path.exists() or not path.is_file(): return self.text(404,'Not found')
+        ctype=mimetypes.guess_type(str(path))[0] or 'application/octet-stream'; size=path.stat().st_size
+        self.send_response(200); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(size)); self.end_headers()
+        with path.open('rb') as f:
+            while True:
+                b=f.read(1024*1024)
+                if not b: break
+                self.wfile.write(b)
+
+    def signup(self):
+        d=self.parse_json(); name=str(d.get('name','')).strip(); username=str(d.get('username','')).strip().lower(); email=str(d.get('email','')).strip().lower(); password=str(d.get('password',''))
+        if len(name)<2 or not re.match(r'^[a-z0-9_]{3,20}$',username) or not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$',email) or len(password)<8: return self.json(400,{'error':'Invalid account fields'})
+        digest,salt=scrypt_hash(password)
+        try:
+            with DB_LOCK:
+                c=db(); cur=c.execute('INSERT INTO users(name,username,email,password_hash,password_salt,created_at) VALUES(?,?,?,?,?,?)',(name,username,email,digest,salt,now_iso())); uid=cur.lastrowid; c.commit(); row=c.execute('SELECT * FROM users WHERE id=?',(uid,)).fetchone(); c.close()
+        except sqlite3.IntegrityError:
+            return self.json(409,{'error':'Username or email already exists'})
+        token=secrets.token_urlsafe(32); exp=datetime.fromtimestamp(datetime.now(timezone.utc).timestamp()+30*86400,tz=timezone.utc).isoformat()
+        with DB_LOCK: c=db(); c.execute('INSERT INTO sessions(user_id,token_hash,created_at,expires_at) VALUES(?,?,?,?)',(uid,token_hash(token),now_iso(),exp)); c.commit(); c.close()
+        return self.json(201,{'user':public_user(row)},self.set_cookie(token))
+
+    def login(self):
+        d=self.parse_json(); email=str(d.get('email','')).strip().lower(); password=str(d.get('password',''))
+        with DB_LOCK: c=db(); row=c.execute('SELECT * FROM users WHERE email=?',(email,)).fetchone(); c.close()
+        if not row or not check_password(password,row['password_hash'],row['password_salt']): return self.json(401,{'error':'Invalid email or password'})
+        token=secrets.token_urlsafe(32); exp=datetime.fromtimestamp(datetime.now(timezone.utc).timestamp()+30*86400,tz=timezone.utc).isoformat()
+        with DB_LOCK: c=db(); c.execute('INSERT INTO sessions(user_id,token_hash,created_at,expires_at) VALUES(?,?,?,?)',(row['id'],token_hash(token),now_iso(),exp)); c.commit(); c.close()
+        return self.json(200,{'user':public_user(row)},self.set_cookie(token))
+
+    def visible_track_clause(self,u):
+        if u: return '(t.visibility="Public" OR t.visibility="Unlisted" OR t.user_id=?)', [u['id']]
+        return '(t.visibility="Public")', []
+
+    def tracks(self):
+        u=get_user_from_handler(self); qs=urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query); limit=max(1,min(int(qs.get('limit',['50'])[0]),200)); sort=qs.get('sort',['popular'])[0]
+        clause,args=self.visible_track_clause(u)
+        order='t.play_count DESC, t.created_at DESC' if sort=='popular' else 't.created_at DESC'
+        with DB_LOCK:
+            c=db(); rows=c.execute(f'''SELECT t.*, (SELECT COUNT(*) FROM comments cm WHERE cm.track_id=t.id) AS comment_count FROM tracks t WHERE {clause} ORDER BY {order} LIMIT ?''',args+[limit]).fetchall(); c.close()
+        base=''; return self.json(200,{'tracks':[track_json(r,base) for r in rows]})
+
+    def upload_track(self):
+        u=require_user(self)
+        if not u: return
+        fields,files=self.multipart(); f=files.get('audio')
+        if not f or not f['data']: return self.json(400,{'error':'Audio file is required'})
+        if len(f['data'])>MAX_UPLOAD: return self.json(413,{'error':'Audio file too large'})
+        title=str(fields.get('title','')).strip() or Path(f['filename']).stem
+        artist=str(fields.get('artist','')).strip() or u['name']; album=str(fields.get('album','')).strip(); genre=str(fields.get('genre','')).strip(); tags=str(fields.get('tags','')).strip(); vis=str(fields.get('visibility','Public')).title(); explicit=1 if str(fields.get('explicit','false')).lower() in ('1','true','yes') else 0
+        if vis not in ('Public','Unlisted','Private'): vis='Public'
+        safe=safe_name(f['filename']); unique=f'{secrets.token_hex(8)}_{safe}'; path=UPLOAD_DIR/unique; path.write_bytes(f['data'])
+        with DB_LOCK:
+            c=db(); cur=c.execute('INSERT INTO tracks(user_id,title,artist,album,genre,tags,visibility,explicit,filename,mime,size_bytes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(u['id'],title,artist,album,genre,tags,vis,explicit,unique,f['content_type'],len(f['data']),now_iso())); tid=cur.lastrowid; c.commit(); row=c.execute('SELECT t.*,0 comment_count FROM tracks t WHERE t.id=?',(tid,)).fetchone(); c.close()
+        out=track_json(row,''); out['streamUrl']=f'/api/tracks/{tid}/stream'; return self.json(201,{'track':out})
+
+    def can_view_track(self,c,tid,u):
+        r=c.execute('SELECT t.*, (SELECT COUNT(*) FROM comments cm WHERE cm.track_id=t.id) AS comment_count FROM tracks t WHERE t.id=?',(tid,)).fetchone()
+        if not r: return None
+        if r['visibility']=='Private' and (not u or r['user_id']!=u['id']): return None
+        return r
+
+    def stream_track(self,tid):
+        u=get_user_from_handler(self)
+        with DB_LOCK: c=db(); r=self.can_view_track(c,tid,u); c.close()
+        if not r: return self.text(404,'Track not found')
+        path=UPLOAD_DIR/r['filename']
+        if not path.exists(): return self.text(404,'Audio file missing')
+        size=path.stat().st_size; rng=self.headers.get('Range'); start=0; end=size-1; status=200
+        if rng and rng.startswith('bytes='):
+            spec=rng[6:].split(',')[0].strip(); a,b=(spec.split('-',1)+[''])[:2]
+            if a: start=int(a)
+            if b: end=int(b)
+            else: end=size-1
+            if start> end or start>=size: self.send_response(416); self.send_header('Content-Range',f'bytes */{size}'); self.end_headers(); return
+            end=min(end,size-1); status=206
+        length=end-start+1; ctype=r['mime'] or 'application/octet-stream'
+        self.send_response(status); self.send_header('Content-Type',ctype); self.send_header('Accept-Ranges','bytes'); self.send_header('Content-Length',str(length));
+        if status==206: self.send_header('Content-Range',f'bytes {start}-{end}/{size}')
+        self.end_headers();
+        with path.open('rb') as f:
+            f.seek(start); remain=length
+            while remain:
+                b=f.read(min(1024*1024,remain))
+                if not b: break
+                self.wfile.write(b); remain-=len(b)
+
+    def play_track(self,tid):
+        u=require_user(self)
+        if not u:return
+        with DB_LOCK: c=db(); c.execute('UPDATE tracks SET play_count=play_count+1 WHERE id=?',(tid,)); c.commit(); c.close(); return self.json(200,{'ok':True})
+
+    def get_comments(self,tid):
+        u=get_user_from_handler(self)
+        with DB_LOCK:
+            c=db(); r=self.can_view_track(c,tid,u)
+            if not r: c.close(); return self.json(404,{'error':'Track not found'})
+            rows=c.execute('SELECT cm.*,u.name,u.username FROM comments cm JOIN users u ON u.id=cm.user_id WHERE cm.track_id=? ORDER BY cm.created_at',(tid,)).fetchall(); c.close()
+        return self.json(200,{'comments':[{'id':x['id'],'text':x['text'],'position':x['position'],'createdAt':x['created_at'],'user':{'id':x['user_id'],'name':x['name'],'username':x['username']}} for x in rows]})
+
+    def add_comment(self,tid):
+        u=require_user(self)
+        if not u:return
+        d=self.parse_json(); text=str(d.get('text','')).strip(); position=float(d.get('position',0) or 0)
+        if not text:return self.json(400,{'error':'Comment cannot be empty'})
+        with DB_LOCK:
+            c=db(); tr=c.execute('SELECT user_id,title FROM tracks WHERE id=?',(tid,)).fetchone()
+            if not tr: c.close(); return self.json(404,{'error':'Track not found'})
+            c.execute('INSERT INTO comments(track_id,user_id,text,position,created_at) VALUES(?,?,?,?,?)',(tid,u['id'],text,position,now_iso()))
+            if tr['user_id']!=u['id']:
+                c.execute('INSERT INTO notifications(user_id,type,title,body,created_at) VALUES(?,?,?,?,?)',(tr['user_id'],'comment','New comment',f"{u['name']} commented on {tr['title']}",now_iso()))
+            c.commit(); c.close()
+        return self.json(201,{'ok':True})
+
+    def get_playlists(self):
+        u=get_user_from_handler(self); clause='p.visibility="Public"'; args=[]
+        if u: clause='(p.visibility="Public" OR p.visibility="Unlisted" OR p.user_id=?)'; args=[u['id']]
+        with DB_LOCK:
+            c=db(); rows=c.execute(f'SELECT p.* FROM playlists p WHERE {clause} ORDER BY p.updated_at DESC LIMIT 200',args).fetchall(); data=[playlist_json(c,r) for r in rows]; c.close()
+        return self.json(200,{'playlists':data})
+
+    def create_playlist(self):
+        u=require_user(self)
+        if not u:return
+        d=self.parse_json(); name=str(d.get('name','')).strip() or 'Untitled playlist'; vis=str(d.get('visibility', 'Public')).title();
+        if vis not in ('Public','Unlisted','Private'): vis='Public'
+        ids=[int(x) for x in (d.get('trackIds') or []) if str(x).isdigit()]
+        with DB_LOCK:
+            c=db(); now=now_iso(); cur=c.execute('INSERT INTO playlists(user_id,name,artist,description,visibility,cover_url,background_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',(u['id'],name,d.get('artist',''),d.get('description',''),vis,d.get('coverData',''),d.get('backgroundData',''),now,now)); pid=cur.lastrowid
+            for pos,tid in enumerate(ids):
+                if c.execute('SELECT 1 FROM tracks WHERE id=? AND (user_id=? OR visibility IN ("Public","Unlisted"))',(tid,u['id'])).fetchone(): c.execute('INSERT OR IGNORE INTO playlist_tracks(playlist_id,track_id,position) VALUES(?,?,?)',(pid,tid,pos))
+            r=c.execute('SELECT * FROM playlists WHERE id=?',(pid,)).fetchone(); data=playlist_json(c,r); c.commit(); c.close()
+        return self.json(201,{'playlist':data})
+
+    def patch_playlist(self,pid):
+        u=require_user(self)
+        if not u:return
+        d=self.parse_json()
+        with DB_LOCK:
+            c=db(); p=c.execute('SELECT * FROM playlists WHERE id=? AND user_id=?',(pid,u['id'])).fetchone()
+            if not p:c.close();return self.json(404,{'error':'Playlist not found'})
+            vals={k:d.get(k,p[k]) for k in ('name','artist','description','visibility','coverData','backgroundData')}
+            vis=str(vals['visibility']).title(); vis=vis if vis in ('Public','Unlisted','Private') else p['visibility']
+            now=now_iso(); c.execute('UPDATE playlists SET name=?,artist=?,description=?,visibility=?,cover_url=?,background_url=?,updated_at=? WHERE id=?',(vals['name'],vals['artist'],vals['description'],vis,vals['coverData'] or '',vals['backgroundData'] or '',now,pid))
+            c.execute('DELETE FROM playlist_tracks WHERE playlist_id=?',(pid,)); ids=[int(x) for x in (d.get('trackIds') or []) if str(x).isdigit()]
+            for pos,tid in enumerate(ids):
+                if c.execute('SELECT 1 FROM tracks WHERE id=? AND (user_id=? OR visibility IN ("Public","Unlisted"))',(tid,u['id'])).fetchone(): c.execute('INSERT OR IGNORE INTO playlist_tracks(playlist_id,track_id,position) VALUES(?,?,?)',(pid,tid,pos))
+            r=c.execute('SELECT * FROM playlists WHERE id=?',(pid,)).fetchone(); data=playlist_json(c,r); c.commit(); c.close()
+        return self.json(200,{'playlist':data})
+
+    def get_messages(self):
+        u=require_user(self)
+        if not u:return
+        with DB_LOCK:
+            c=db(); rows=c.execute('''SELECT m.*, su.name sname,su.username susername,ru.name rname,ru.username rusername FROM messages m JOIN users su ON su.id=m.sender_id JOIN users ru ON ru.id=m.recipient_id WHERE m.sender_id=? OR m.recipient_id=? ORDER BY m.created_at DESC LIMIT 100''',(u['id'],u['id'])).fetchall(); c.close()
+        return self.json(200,{'messages':[{'id':x['id'],'text':x['body'],'body':x['body'],'message':x['body'],'createdAt':x['created_at'],'sender':{'id':x['sender_id'],'name':x['sname'],'username':x['susername']},'recipient':{'id':x['recipient_id'],'name':x['rname'],'username':x['rusername']}} for x in rows]})
+
+    def send_message(self):
+        u=require_user(self)
+        if not u:return
+        d=self.parse_json(); text=str(d.get('text',d.get('body',d.get('message','')))).strip(); to=d.get('recipientId') or d.get('toUserId')
+        if not text or not str(to).isdigit(): return self.json(400,{'error':'recipientId and message are required'})
+        rid=int(to)
+        with DB_LOCK:
+            c=db(); rec=c.execute('SELECT id,name FROM users WHERE id=?',(rid,)).fetchone()
+            if not rec:c.close();return self.json(404,{'error':'Recipient not found'})
+            ts=now_iso(); cur=c.execute('INSERT INTO messages(sender_id,recipient_id,body,created_at) VALUES(?,?,?,?)',(u['id'],rid,text,ts)); mid=cur.lastrowid; c.execute('INSERT INTO notifications(user_id,type,title,body,created_at) VALUES(?,?,?,?,?)',(rid,'message',f'Message from {u["name"]}',text,ts)); c.commit(); c.close()
+        return self.json(201,{'message':{'id':mid,'text':text,'createdAt':ts}})
+
+    def get_notifications(self):
+        u=require_user(self)
+        if not u:return
+        with DB_LOCK:
+            c=db(); rows=c.execute('SELECT * FROM notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 100',(u['id'],)).fetchall(); c.close()
+        return self.json(200,{'notifications':[{'id':x['id'],'type':x['type'],'title':x['title'],'text':x['body'],'body':x['body'],'createdAt':x['created_at']} for x in rows]})
+
+init_db()
+print(f'SONORA server listening on http://127.0.0.1:{PORT} (data: {DATA_DIR})')
+ThreadingHTTPServer.allow_reuse_address=True
+httpd=ThreadingHTTPServer((HOST,PORT),H)
+httpd.serve_forever()
