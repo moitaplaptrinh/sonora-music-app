@@ -160,71 +160,36 @@ body.theme-retro .glass,body.theme-retro .card,body.theme-retro .row,body.theme-
 <script>
 const $=s=>document.querySelector(s),E=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const LS=k=>{try{return JSON.parse(localStorage.getItem('sn_'+k))}catch(e){return null}},SV=(k,v)=>{try{localStorage.setItem('sn_'+k,JSON.stringify(v))}catch(e){}};
-const API={online:false,user:null,authReady:false};
+const API={online:false,user:null};
 const apiFetch=async(path,opt={})=>{const r=await fetch(path,{credentials:'include',...opt});let data=null;try{data=await r.json()}catch(_){data=null}if(!r.ok)throw new Error(data?.error||('HTTP '+r.status));return data};
 const apiJson=(path,body)=>apiFetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
 const backendReady=()=>API.online&&!!API.user;
-const cacheAuth=u=>{try{localStorage.setItem(AK,JSON.stringify({user:u,at:Date.now(),server:true}))}catch(e){}};
 let communityTracks=[],communityComments={},communityPlaylists=[];
-async function bootAPI(){
-  try{
-    await apiFetch('/api/health');
-    API.online=true;
-    const me=await apiFetch('/api/me');
-    const serverUser=me.user||null;
-    const cached=axSes();
-    API.user=serverUser;
-
-    // The server session is the source of truth. Never let an old local/demo
-    // account override the account represented by this browser's cookie.
-    if(serverUser){
-      if(!cached || String(cached.id)!==String(serverUser.id) || String(cached.email||'').toLowerCase()!==String(serverUser.email||'').toLowerCase()){
-        cacheAuth(serverUser);
-      }
-      $('#authScreen')?.classList.remove('open');
-      document.body.classList.remove('noauth');
-      render();
-    }else if(cached){
-      try{localStorage.removeItem(AK)}catch(e){}
-      document.body.classList.add('noauth');
-      $('#authScreen')?.classList.add('open');
-      axS.r='login';
-      axR();
-    }
-    API.authReady=true;
-    await refreshCommunity();
-  }catch(_){
-    API.online=false;
-    API.authReady=false;
-  }
+async function bootAPI(){try{await apiFetch('/api/health');API.online=true;try{API.user=(await apiFetch('/api/me')).user||null}catch(_){API.user=null};if(API.user&&!axSes())axIn(API.user,1);await refreshCommunity()}catch(_){API.online=false}}
+async function refreshCommunity(){if(!API.online)return;try{const r=await apiFetch('/api/recommendations?limit=12');communityTracks=r.tracks||[]}catch(_){}try{const r=await apiFetch('/api/tracks?limit=200&sort=popular');communityTracks=(r.tracks||communityTracks)}catch(_){}try{const r=await apiFetch('/api/playlists');communityPlaylists=r.playlists||[]}catch(_){} /* render is triggered after remote library hydration */}
+async function markServerPlay(t){if(!backendReady()||!t?.serverId)return;try{await apiJson('/api/tracks/'+t.serverId+'/play',{})}catch(_){}refreshCommunity()}
+function serverTrackToLocal(s){
+  const id='s'+s.id, ownerId=s.owner?.id??null, mine=!!API.user&&String(ownerId)===String(API.user.id);
+  return {id,serverId:+s.id,server:true,ownerId,owner:s.owner||null,title:s.title,artist:s.artist||'Unknown artist',album:s.album||'',genre:s.genre||'',tags:s.tags||'',vis:s.visibility||'Public',explicit:!!s.explicit,url:s.streamUrl||('/api/tracks/'+s.id+'/stream'),streamUrl:s.streamUrl||('/api/tracks/'+s.id+'/stream'),dur:+s.duration||0,peaks:s.peaks||[],cover:s.coverUrl||'',up:mine?1:0,seed:(+s.id%8)+1,playCount:+s.playCount||0,commentCount:+s.commentCount||0,createdAt:s.createdAt};
 }
-async function mergeServerTracks(serverTracks){
+function mergeServerTracks(rows){
   const incoming=new Set();
-  for(const s of (serverTracks||[])){
-    const id='s'+s.id; incoming.add(id);
-    const t=serverTrackToLocal(s), old=B[id];
-    if(old) Object.assign(old,t); else { T.push(t); B[id]=t; }
+  for(const s of rows||[]){
+    const t=serverTrackToLocal(s); incoming.add(t.id);
+    const old=B[t.id];
+    if(old) Object.assign(old,t); else {T.push(t); B[t.id]=t;}
   }
   return incoming;
 }
-async function refreshCommunity(shouldRender=true){
+async function loadCommunity(){
   if(!API.online)return;
-  let changed=false;
   try{
-    const r=await apiFetch('/api/tracks?limit=200&sort=recent');
-    const before=T.length; await mergeServerTracks(r.tracks||[]);
+    const r=await apiFetch('/api/community/tracks?limit=200&sort=newest');
     communityTracks=r.tracks||[];
-    changed=changed || T.length!==before || !!(r.tracks||[]).length;
+    mergeServerTracks(communityTracks);
+    if(view==='home'||view==='search'||view==='disc'||view==='lib')render();
   }catch(_){}
-  try{
-    const r=await apiFetch('/api/playlists');
-    communityPlaylists=r.playlists||[];
-  }catch(_){}
-  if(shouldRender && changed && !document.body.classList.contains('noauth') && view!=='up' && view!=='set' && !(view==='search'&&qs.trim())) render();
 }
-async function markServerPlay(t){if(!backendReady()||!t?.serverId)return;try{await apiJson('/api/tracks/'+t.serverId+'/play',{})}catch(_){} await refreshCommunity(true)}
-function serverTrackToLocal(s){return{id:'s'+s.id,serverId:s.id,ownerId:s.ownerId,title:s.title,artist:s.artist||'Unknown artist',album:s.album||'',genre:s.genre||'',tags:s.tags||'',vis:s.visibility||'Public',explicit:!!s.explicit,url:s.streamUrl||('/api/tracks/'+s.id+'/stream'),streamUrl:s.streamUrl||('/api/tracks/'+s.id+'/stream'),dur:+s.duration||0,peaks:s.peaks||[],cover:s.coverUrl||'',up:!!(API.user&&s.ownerId===API.user.id),seed:(+s.id%8)+1,playCount:+s.playCount||0,commentCount:+s.commentCount||0,createdAt:s.createdAt}}
-async function loadCommunity(){if(!API.online)return refreshCommunity(false); await refreshCommunity(false)}
 
 const fmt=s=>isFinite(s)?Math.floor(s/60)+':'+String(Math.floor(s%60)).padStart(2,'0'):'0:00';
 const SEEDS=[];
@@ -292,7 +257,7 @@ $('#vol').value=vol*100;$('#bm').innerHTML=vol?'🔈&#xFE0E;':'🔇&#xFE0E;';$('
 function applyTheme(){const d=document.documentElement;theme==='system'?d.removeAttribute('data-theme'):d.dataset.theme=theme;$('#th').textContent='Theme: '+theme;draw()}
 function rowsOn(){document.querySelectorAll('.row').forEach(r=>r.classList.toggle('on',!!cur&&VL[r.dataset.i]===cur.id))}
 const hl=(s,k)=>k?E(s).replace(new RegExp('('+k.replace(/[.*+?^${}()|[\]\\&<>"]/g,'\\$&')+')','ig'),'<b class="m">$1</b>'):E(s);
-const row=(t,i,k)=>{const posted=t.createdAt?ago(t.createdAt):'';return `<div class="row" data-a="play" data-i="${i}"><div class="cov" style="${cov(t)}"></div><div class="rt1"><b><span class="eq"><i></i><i></i><i></i></span>${hl(t.title,k)}</b><span>${hl(t.artist,k)}</span><small class="song-meta">${t.playCount||0} lượt nghe · ${posted||'Local file'}${t.commentCount?` · ${t.commentCount} bình luận`:''}</small></div><span class="du">${fmt(t.dur)}</span><button class="ic" data-a="songcomments" data-id="${t.id}" aria-label="Comments">💬</button><button class="ic" data-a="like" data-id="${t.id}" aria-label="Like">${liked.includes(t.id)?'♥&#xFE0E;':'♡&#xFE0E;'}</button><button class="ic" data-a="more" data-id="${t.id}" aria-label="More">⋯</button></div>`};
+const row=(t,i,k)=>{const posted=t.createdAt?ago(t.createdAt):'';return `<div class="row" data-a="play" data-i="${i}"><div class="cov" style="${cov(t)}"></div><div class="rt1"><b><span class="eq"><i></i><i></i><i></i></span>${hl(t.title,k)}</b><span>${hl(t.artist,k)}</span><small class="song-meta">${t.playCount||0} lượt nghe · ${posted||'Local file'}${t.owner?.name?` · by ${E(t.owner.name)}`:''}${t.commentCount?` · ${t.commentCount} bình luận`:''}</small></div><span class="du">${fmt(t.dur)}</span><button class="ic" data-a="songcomments" data-id="${t.id}" aria-label="Comments">💬</button><button class="ic" data-a="like" data-id="${t.id}" aria-label="Like">${liked.includes(t.id)?'♥&#xFE0E;':'♡&#xFE0E;'}</button><button class="ic" data-a="more" data-id="${t.id}" aria-label="More">⋯</button></div>`};
 const list=(ids,k)=>{VL=ids;return ids.map((id,i)=>row(B[id],i,k)).join('')};
 const card=(t,i)=>`<div class="card" data-a="qv" data-id="${t.id}"><div class="cov" style="${cov(t)}"></div><b>${E(t.title)}</b><span>${E(t.artist)}</span><small class="song-meta">${t.playCount||0} lượt nghe${t.createdAt?' · '+ago(t.createdAt):''}</small></div>`;
 function render(top){const m=$('#main');let h='';const all=T.map(t=>t.id);
@@ -413,9 +378,28 @@ const closeMenu=()=>document.querySelectorAll('.menu').forEach(m=>m.remove());
 function menu(x,y,id){closeMenu();const m=document.createElement('div');m.className='menu glass';m.innerHTML=`<button data-m="pn" data-id="${id}">Play next</button><button data-m="aq" data-id="${id}">Add to queue</button>`+pls.map(p=>`<button data-m="pl" data-p="${p.id}" data-id="${id}">Add to ${E(p.name)}</button>`).join('')+(view==='pl'?`<button data-m="rm" data-id="${id}">Remove from playlist</button>`:'')+`<button data-m="fl" data-id="${id}">Start Sonora Flow</button><button data-m="ba" data-id="${id}">Build playlist around this</button><button data-m="ga" data-id="${id}">Go to artist</button>${B[id].up?`<button data-m="del" data-id="${id}">Delete from library</button>`:''}<button data-m="ln" data-id="${id}">${liked.includes(id)?'Unlike':'Like'}</button>`;document.body.appendChild(m);m.style.left=Math.min(x,innerWidth-m.offsetWidth-8)+'px';m.style.top=Math.min(y,innerHeight-m.offsetHeight-8)+'px'}
 function toggleLike(id){liked=liked.includes(id)?liked.filter(x=>x!==id):[id,...liked];SV('liked',liked);if(liked.includes(id))act('Liked '+B[id].title);toast(liked.includes(id)?'Liked':'Removed from liked');document.querySelectorAll(`[data-a=like][data-id="${id}"]`).forEach(b=>{b.innerHTML=liked.includes(id)?'♥&#xFE0E;':'♡&#xFE0E;';b.classList.remove('pop');void b.offsetWidth;b.classList.add('pop')});if(view==='lib')render()}
 const savePl=()=>{SV('pls',pls);if(API.online&&API.user)pls.filter(p=>p).forEach(syncPlaylist)};
-async function syncPlaylist(p){try{const payload={name:p.name,artist:p.artist||'',description:p.desc||'',visibility:p.vis||'Public',coverData:p.av||'',backgroundData:p.bg||'',trackIds:p.t.map(id=>B[id]?.serverId).filter(Boolean)};let r;if(p.serverId)r=await apiFetch('/api/playlists/'+p.serverId,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});else{r=await apiFetch('/api/playlists',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});p.serverId=r.playlist?.id;SV('pls',pls)}}catch(_){}
+async function syncPlaylist(p){try{const payload={name:p.name,artist:p.artist||'',description:p.desc||'',coverData:p.av||'',backgroundData:p.bg||'',public:p.vis!=='Private',trackIds:p.t.map(id=>B[id]?.serverId).filter(Boolean)};let r;if(p.serverId)r=await apiFetch('/api/playlists/'+p.serverId,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});else{r=await apiFetch('/api/playlists',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});p.serverId=r.playlist?.id;SV('pls',pls)}}catch(_){}
 }
-async function syncPublishedToServer(rd,localIds,asPlaylist){if(!API.online||!API.user)return;const remote=[];for(let i=0;i<rd.length;i++){const p=rd[i],file=p.file;if(!file)continue;try{const fd=new FormData();fd.append('audio',file,file.name);fd.append('title',p.title.trim()||'Untitled');fd.append('artist',p.artist.trim()||'You');fd.append('album',p.album||'');fd.append('genre',p.genre||'');fd.append('tags',p.tags||'');fd.append('visibility',p.vis||'Public');fd.append('explicit',String(!!p.explicit));const r=await apiFetch('/api/tracks',{method:'POST',body:fd});const t=B[localIds[i]];if(t&&r.track){t.serverId=r.track.id;t.url=r.track.streamUrl;t.cover=r.track.coverUrl||t.cover;t.playCount=0;t.commentCount=0;remote.push(r.track.id)}}catch(e){toast('Cloud upload failed for '+file.name)}}if(asPlaylist&&remote.length){const p=pls.find(x=>x.t.includes(localIds[0]));if(p){p.t=localIds;syncPlaylist(p)}}await refreshCommunity();render(1)}
+async function syncPublishedToServer(rd,localIds,asPlaylist){
+  if(!API.online||!API.user) throw new Error('SONORA server is offline. Start sever.py and open SONORA from http://localhost:8787/');
+  const remote=[];
+  for(let i=0;i<rd.length;i++){
+    const p=rd[i],file=p.file; if(!file)continue;
+    const fd=new FormData();
+    fd.append('audio',file,file.name); fd.append('title',p.title.trim()||'Untitled'); fd.append('artist',p.artist.trim()||'You');
+    fd.append('album',p.album||''); fd.append('genre',p.genre||''); fd.append('tags',p.tags||'');
+    fd.append('visibility',p.vis||'Public'); fd.append('explicit',String(!!p.explicit));
+    const r=await apiFetch('/api/tracks',{method:'POST',body:fd});
+    if(!r.track) throw new Error('Server did not return the uploaded track');
+    const t=B[localIds[i]];
+    if(t){t.server=true;t.serverId=+r.track.id;t.ownerId=API.user.id;t.owner=API.user;t.url=r.track.streamUrl||('/api/tracks/'+r.track.id+'/stream');t.streamUrl=t.url;t.cover=r.track.coverUrl||t.cover;t.up=1;t.playCount=0;t.commentCount=0;t.createdAt=r.track.createdAt;t.vis=r.track.visibility||t.vis;}
+    remote.push(r.track.id);
+  }
+  if(asPlaylist&&remote.length){const p=pls.find(x=>x.t.includes(localIds[0]));if(p){p.t=localIds;await syncPlaylist(p)}}
+  await loadCommunity();
+  render(1);
+  return remote;
+}
 
 document.addEventListener('click',e=>{const mi=e.target.closest('[data-m]');if(mi){const d=mi.dataset,id=d.id;if(d.m==='pn'){cur?q.splice(q.indexOf(cur.id)+1,0,id):playList([id],id);toast('Playing next')}else if(d.m==='aq'){cur?q.push(id):playList([id],id);toast('Added to queue')}else if(d.m==='pl'){const p=pls.find(x=>x.id===d.p);if(p.t.includes(id))toast('Already in '+p.name);else{p.t.push(id);savePl();toast('Added to '+p.name)}}else if(d.m==='rm'){const p=pls.find(x=>x.id===arg);p.t=p.t.filter(x=>x!==id);savePl();render()}else if(d.m==='fl'){playList([id,...flow(id,fm)],id);toast('Sonora Flow · '+fm)}else if(d.m==='ba'){pls.push({id:'p'+Date.now(),name:'Around '+B[id].title,t:[id,...flow(id,fm,9)]});savePl();act('Built a playlist around '+B[id].title);toast('Playlist created')}else if(d.m==='del'){if(!mi.dataset.c){mi.dataset.c=1;mi.textContent='Click again to delete';return}const t=B[id];if(cur&&cur.id===id){au.pause();au.removeAttribute('src');cur=null;$('#inf').innerHTML=''}if(t.url)URL.revokeObjectURL(t.url);T.splice(T.indexOf(t),1);delete B[id];liked=liked.filter(x=>x!==id);pls.forEach(p=>p.t=p.t.filter(x=>x!==id));q=q.filter(x=>x!==id);SV('liked',liked);savePl();idbDel(id);toast('Deleted');render()}else if(d.m==='ga'){view='art';arg=B[id].artist;render(1)}else toggleLike(id);rq();closeMenu();return}
 const a=e.target.closest('[data-a]');if(!e.target.closest('.menu'))closeMenu();if(!e.target.closest('#qv,[data-a=qv]'))closeQV();if(!a)return;if(a.closest('.menu'))setTimeout(closeMenu);const d=a.dataset;
@@ -451,7 +435,33 @@ case'fmode':fm=d.v;SV('fm',fm);render();break;
 case'rpst':{const v=$('#rq').value.trim();rps.unshift({id:Date.now(),tid:cur.id,q:v,at:Date.now()});SV('rps',rps);toast('Reposted');render()}break;case'unrp':rps=rps.filter(x=>x.tid!==cur.id);SV('rps',rps);render();break;case'qvp':playList(qvc,d.id);closeQV();break;case'fp':fpset(1);break;case'fpx':fpset(0);break;case'pick':$('#fi').click();break;case'flt':flt=d.v;render();break;case'iex':{const it=IT(d.id);it.exp=!it.exp;render()}break;case'irm':{const it=IT(d.id);if(it.url)URL.revokeObjectURL(it.url);pend.splice(pend.indexOf(it),1);render()}break;case'irt':{const it=IT(d.id);it.err='';proc(it)}break;case'idk':IT(d.id).dup='';render();break;
 case'ipv':{const it=IT(d.id),id='i'+it.id;B[id]={id,title:it.title,artist:it.artist,url:it.url,dur:it.dur,peaks:it.peaks,cover:it.cover,seed:3};playList([id],id)}break;
 case'bulk':pend.forEach(p=>{if(bA)p.artist=bA;if(bAl)p.album=bAl});toast('Applied to all');render();break;
-case'pubn':case'pubp':{const rd=pend.filter(p=>p.status==='Ready'&&!p.dup);if(!rd.length){toast('No tracks are ready to publish');break}const ids=[];rd.forEach(p=>{const t={id:'u'+Date.now()+p.id,title:p.title.trim()||'Untitled',artist:p.artist.trim()||'You',album:p.album,genre:p.genre,tags:p.tags,vis:p.vis,explicit:p.explicit,url:p.url,dur:p.dur,peaks:p.peaks,cover:p.cover,hash:p.hash,size:p.size,hl:p.hl,sr:p.sr,ch:p.ch,up:1,seed:p.id%8+1};T.push(t);B[t.id]=t;saveTrack(t,p);ids.push(t.id);pend.splice(pend.indexOf(p),1)});if(d.a==='pubp'){pls.push({id:'p'+Date.now(),name:bAl||rd[0].album||'Imported',t:ids});savePl()}act('Published '+ids.length+' track'+(ids.length>1?'s':''));toast(ids.length+' tracks published');view='lib';render(1);syncPublishedToServer(rd,ids,d.a==='pubp')}break;
+case'pubn':case'pubp':{
+  const rd=pend.filter(p=>p.status==='Ready'&&!p.dup);
+  if(!rd.length){toast('No tracks are ready to publish');break}
+  (async()=>{
+    try{
+      if(!API.online||!API.user) throw new Error('SONORA server is offline. Start sever.py and open SONORA from http://localhost:8787/');
+      const ids=[];
+      for(const p of rd){
+        const t={id:'u'+Date.now()+p.id,title:p.title.trim()||'Untitled',artist:p.artist.trim()||'You',album:p.album,genre:p.genre,tags:p.tags,vis:p.vis,explicit:p.explicit,url:p.url,dur:p.dur,peaks:p.peaks,cover:p.cover,hash:p.hash,size:p.size,hl:p.hl,sr:p.sr,ch:p.ch,up:1,server:false,seed:p.id%8+1};
+        T.push(t); B[t.id]=t; ids.push(t.id); saveTrack(t,p);
+      }
+      await syncPublishedToServer(rd,ids,d.a==='pubp');
+      if(d.a==='pubp'){
+        pls.push({id:'p'+Date.now(),name:bAl||rd[0].album||'Imported',t:ids});
+        savePl();
+      }
+      for(const p of rd){const i=pend.indexOf(p);if(i>=0)pend.splice(i,1)}
+      act('Published '+ids.length+' track'+(ids.length>1?'s':''));
+      toast(ids.length+' tracks published to SONORA community');
+      view='lib'; render(1);
+    }catch(err){
+      toast(err.message||'Publish failed');
+      render(1);
+    }
+  })();
+  break;
+}
 case'folder':scanDir();break;case'vm':vm=+d.v;render();break;
 }});
 document.addEventListener('input',e=>{const t=e.target,f=t.dataset.f;if(f){const it=IT(t.dataset.id);if(it)it[f]=t.type==='checkbox'?t.checked:t.value}if(t.dataset.mk){const k=t.dataset.mk,v=+t.value;k==='eq'?M.eq[+t.dataset.i]=v:M[k]=v;M.pre='Custom';SV('mst',M);applyFx();const l=t.parentElement.querySelector('b');if(l)l.textContent=k==='eq'?v:v+({th:' dB',ra:':1',at:' s',re:' s',mk:' dB',dr:'',ce:' dB'}[k]||'')}if(t.id==='ba')bA=t.value;if(t.id==='bl')bAl=t.value});
@@ -476,7 +486,7 @@ r.style.setProperty('--as',1/(x.sp||1));r.style.setProperty('--bl',x.bl+'px');Ob
 function post(){const m=$('#main');if(view!=='pl'&&pedit){pedit=null;PD={av:'',bg:''}}
 m.querySelectorAll('.row[data-a=openpl]').forEach(r=>{const p=pls.find(x=>x.id===r.dataset.id);if(!p)return;r.insertAdjacentHTML('afterbegin',`<div class="cov" style="${pcv(p)}"></div>`);if(p.artist)r.querySelector('b').insertAdjacentHTML('afterend',`<span class="mut" style="font-size:12px">${E(p.artist)}</span>`)});
 if(view==='lib'){const n=$('#pn');if(n)n.parentElement.outerHTML=pform(0)}
-if(view==='home'){const h=m.querySelector('.hero'),x=m.querySelector('.hx');if(x&&cs.name)x.textContent=x.textContent.replace('.',', '+cs.name+'.');if(h&&pls.length)h.insertAdjacentHTML('afterend',`<h2>Your playlists</h2><div class="grid">${pls.map(p=>`<div class="card" data-a="openpl" data-id="${p.id}"><div class="cov" style="${pcv(p)}"></div><b>${E(p.name)}</b><span>${E(p.artist||p.t.length+' songs')}</span></div>`).join('')}</div>`);if(h&&communityPlaylists.length)h.insertAdjacentHTML('afterend',`<h2>Community playlists</h2><div class="grid">${communityPlaylists.slice(0,6).map(p=>`<div class="card" data-a="cpl" data-id="${p.id}"><div class="cov" style="${p.coverUrl?`background:url(${p.coverUrl}) center/cover`:'background:var(--ho)'}"></div><b>${E(p.name)}</b><span>${E(p.artist||'SONORA community')} · ${p.trackIds?.length||0} songs${p.createdAt?' · '+ago(p.createdAt):''}</span></div>`).join('')}</div>`);const host=communityTracks.map(s=>B['s'+s.id]).filter(Boolean).slice(0,8);if(host.length)h.insertAdjacentHTML('afterend',`<h2>Community picks · most played</h2><div class="grid">${host.map((s,i)=>card(s,i)).join('')}</div>`)}
+if(view==='home'){const h=m.querySelector('.hero'),x=m.querySelector('.hx');if(x&&cs.name)x.textContent=x.textContent.replace('.',', '+cs.name+'.');if(h&&pls.length)h.insertAdjacentHTML('afterend',`<h2>Your playlists</h2><div class="grid">${pls.map(p=>`<div class="card" data-a="openpl" data-id="${p.id}"><div class="cov" style="${pcv(p)}"></div><b>${E(p.name)}</b><span>${E(p.artist||p.t.length+' songs')}</span></div>`).join('')}</div>`);if(h&&communityPlaylists.length)h.insertAdjacentHTML('afterend',`<h2>Community playlists</h2><div class="grid">${communityPlaylists.slice(0,6).map(p=>`<div class="card" data-a="cpl" data-id="${p.id}"><div class="cov" style="${p.coverUrl?`background:url(${p.coverUrl}) center/cover`:'background:var(--ho)'}"></div><b>${E(p.name)}</b><span>${E(p.artist||'SONORA community')} · ${p.trackIds?.length||0} songs${p.createdAt?' · '+ago(p.createdAt):''}</span></div>`).join('')}</div>`);const host=communityTracks.slice().sort((a,b)=>(+b.playCount||0)-(+a.playCount||0)).slice(0,8).map(s=>{const t=B['s'+s.id];return t||serverTrackToLocal(s)});if(host.length)h.insertAdjacentHTML('afterend',`<h2>Community picks · most played</h2><div class="grid">${host.map((s,i)=>card(s,i)).join('')}</div>`)}
 if(view==='pl'){const p=pls.find(x=>x.id===arg);if(p){const mn=Math.round(p.t.reduce((a,i)=>a+(B[i]?B[i].dur:0),0)/60);for(let i=0;i<3;i++)m.firstElementChild.remove();m.insertAdjacentHTML('afterbegin',pedit===p.id?`<div class="plh">${pform(1)}</div>`:`<div class="plh${p.bg?' im':''}" style="${p.bg?`background-image:url(${p.bg})`:''}"><div class="plav" style="${pcv(p)}"></div><div style="min-width:0;flex:1"><span class="st">Playlist</span><h1>${E(p.name)}</h1><p class="mut">${p.artist?E(p.artist)+' · ':''}${p.t.length} songs${mn?' · '+mn+' min':''}</p>${p.desc?`<p style="margin-top:6px">${E(p.desc)}</p>`:''}<p style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-a="plplay">Play</button><button class="btn g" data-a="xshuf">Shuffle</button><button class="btn g" data-a="xedit">Edit</button><button class="btn g" data-a="xdup">Duplicate</button><button class="btn g" data-a="delpl">Delete</button></p></div></div>`);m.querySelectorAll('.row').forEach((r,i)=>{if(r.dataset.a==='play')r.insertAdjacentHTML('beforeend',`<button class="ic" data-a="xrm" data-i="${i}" aria-label="Remove from playlist">✕</button>`)})}}
 if(view==='set'){const h=m.querySelector('h1');if(h)h.insertAdjacentHTML('afterend',cust())}
 $('#spl').innerHTML=pls.length?'<div class="sc">Playlists</div>'+pls.map(p=>`<button class="nv" data-a="openpl" data-id="${p.id}"><span class="cov" style="${pcv(p)};width:22px;height:22px;border-radius:7px"></span><span>${E(p.name)}</span></button>`).join(''):''}
@@ -509,16 +519,12 @@ else if(r==='signup')c.innerHTML=L+`<h1 class="auth-title">Create your account.<
 else if(r==='forgot')c.innerHTML=L+`<h1 class="auth-title">Reset your password.</h1><p class="auth-sub">We'll send a reset link to your email.</p><form id="authForm" novalidate>${F('fgEmail','Email','email','you@sonora.app')}<button class="auth-btn" id="authSubmit" type="submit">Send Reset Link</button></form><div class="auth-foot">${G('login','← Back to sign in')}</div>`;
 else{const A=[...new Set(T.map(t=>t.artist))],ON=[['What do you listen to?','Pick a few genres to personalize your feed.','genres',['Electronic','Ambient','Cinematic','Downtempo','Techno','House','Lo-fi','Hip-hop']],['Who are you into?','Follow artists to shape your recommendations.','artists',A],['What\'s your vibe?','Choose the moods you want to hear.','moods',['Night','Calm','Driving','Focus','Energetic','Melancholy']]],st=axS.st,o=ON[st];
 c.innerHTML=L+`<p class="auth-sub" style="margin-bottom:14px;font-size:11px;letter-spacing:.1em;text-transform:uppercase">Step ${st+1} of 4</p>`+(o?`<h2 style="font:700 22px Manrope,Inter;letter-spacing:-.02em;margin:0 0 6px;text-align:center">${o[0]}</h2><p class="auth-sub" style="margin-bottom:0">${o[1]}</p><div class="onb-tiles">${o[3].map(g=>`<button class="onb-tile${axS.sel[o[2]].includes(g)?' on':''}" data-a="onb-pick" data-k="${o[2]}" data-v="${E(g)}">${E(g)}</button>`).join('')}</div>`:`<h2 style="font:700 22px Manrope,Inter;letter-spacing:-.02em;margin:0 0 6px;text-align:center">You're ready.</h2><p class="auth-sub">SONORA is personalizing your experience.</p><div style="text-align:center;font-size:60px;margin:30px 0">◈</div>`)+`<div style="display:flex;gap:8px;margin-top:8px">${st>0?'<button class="btn g" data-a="onb-back" style="flex:1">Back</button>':''}<button class="auth-btn" data-a="onb-next" style="flex:${st>0?2:1};margin-top:0">${st===3?'Enter SONORA':'Continue'}</button></div>`}}
-function axIn(u,back){
-  cacheAuth(u);
-  API.user=u;
-  $('#authScreen').classList.remove('open');
-  document.body.classList.remove('noauth');
-  if(!cs.name){cs.name=String(u.name||u.username||'').slice(0,24);saveCS();applyCS()}
-  render();
-  toast((back?'Welcome back, ':'Welcome to SONORA, ')+(u.name||u.username));
-}
+function axIn(u,back){try{localStorage.setItem(AK,JSON.stringify({user:u,at:Date.now()}))}catch(e){}$('#authScreen').classList.remove('open');document.body.classList.remove('noauth');if(!cs.name){cs.name=String(u.name||u.username||'').slice(0,24);saveCS();applyCS()}render();toast((back?'Welcome back, ':'Welcome to SONORA, ')+(u.name||u.username))}
 function axOut(){au.pause();if(API.online)fetch('/api/auth/logout',{method:'POST',credentials:'include'}).catch(()=>{});API.user=null;try{localStorage.removeItem(AK)}catch(e){}closeMenu();closeQV();fpset(0);document.body.classList.add('noauth');axS.r='login';axR();$('#authScreen').classList.add('open')}
+document.addEventListener('submit',e=>{if(!e.target.closest('#authForm'))return;e.preventDefault();const r=axS.r,b=$('#authSubmit'),V=id=>$('#'+id).value;let ok=true;const ck=(id,bad,m)=>{axErr(id,bad?m:'');if(bad)ok=false},go=(t,f)=>{b.classList.add('loading');b.disabled=true;setTimeout(()=>{b.classList.remove('loading');b.disabled=false;f()},t)};
+if(r==='login'){const em=V('authEmail').trim(),pw=V('authPw');ck('authEmail',!okMail(em),'Please enter a valid email');ck('authPw',pw.length<8,'Min. 8 characters');if(ok)go(700,()=>axIn({id:uid(),email:em,username:em.split('@')[0],name:em.split('@')[0].replace(/[^a-z]/gi,' ').replace(/\b\w/g,c=>c.toUpperCase()).trim()||'Listener'},1))}
+else if(r==='signup'){const n=V('suName').trim(),u=V('suUser').trim().toLowerCase(),em=V('suEmail').trim(),pw=V('suPw');ck('suName',n.length<2,'Name too short');ck('suUser',!/^[a-z0-9_]{3,20}$/.test(u),'3-20 chars: a-z, 0-9, _');ck('suEmail',!okMail(em),'Invalid email');ck('suPw',pw.length<8,'Min. 8 characters');ck('suPw2',pw!==V('suPw2'),'Passwords do not match');if(ok)go(800,()=>{axS.pu={id:uid(),email:em,username:u,name:n};axS.r='onb';axS.st=0;axS.sel={genres:[],artists:[],moods:[]};axR()})}
+else if(r==='forgot'){const em=V('fgEmail').trim();ck('fgEmail',!okMail(em),'Invalid email');if(ok)go(700,()=>{toast('Reset link sent (demo)');setTimeout(()=>{axS.r='login';axR()},900)})}});
 const axFin=()=>{const u=axS.pu||{id:uid(),name:'Listener',username:'listener',email:'listener@sonora.app'};axS.pu=null;if(axS.sel.artists.length){fol=[...new Set([...fol,...axS.sel.artists])];SV('fol',fol)}axIn(u,0)};
 document.addEventListener('click',e=>{const a=e.target.closest('[data-a]'),d=a&&a.dataset;if(a&&/^(auth|onb)-/.test(d.a)){const k=d.a;if(k==='auth-goto'){axS.r=d.v;axR()}else if(k==='auth-social'){if(d.v==='Google'){window.location.href=new URL('/api/auth/google',window.location.origin).href}else if(d.v==='Apple'){toast('Apple Sign In chưa được cấu hình OAuth trên server')} }else if(k==='onb-pick'){const x=axS.sel[d.k];axS.sel[d.k]=x.includes(d.v)?x.filter(v=>v!==d.v):[...x,d.v];axR()}else if(k==='onb-next'){if(axS.st<3){axS.st++;axR()}else axFin()}else if(k==='onb-back'&&axS.st>0){axS.st--;axR()}return}
 if(e.target.closest('#authBack')){if(axS.r==='onb'&&axS.st>0)axS.st--;else axS.r='login';axR()}else if(e.target.closest('#authSkip'))axFin()});
@@ -526,31 +532,7 @@ document.addEventListener('keydown',e=>{if(document.body.classList.contains('noa
 if(axSes())document.body.classList.remove('noauth');else{$('#authScreen').classList.add('open');axR()}
 
 /* ---- real backend auth bridge: capture phase keeps existing auth UI/flow intact ---- */
-document.addEventListener('submit',async e=>{
-  const form=e.target.closest('#authForm');
-  if(!form)return;
-  e.preventDefault();
-  e.stopImmediatePropagation();
-  if(!API.authReady||!API.online){toast('SONORA server is not ready. Please try again.');return}
-  const r=axS.r,b=$('#authSubmit'),V=id=>$('#'+id)?.value||'',setBusy=x=>{if(b){b.disabled=x;b.classList.toggle('loading',x)}};
-  try{
-    setBusy(true);
-    if(r==='login'){
-      const data=await apiJson('/api/auth/login',{email:V('authEmail').trim(),password:V('authPw')});
-      API.user=data.user;
-      axIn(API.user,1);
-      toast('Signed in to SONORA Cloud');
-    }else if(r==='signup'){
-      const data=await apiJson('/api/auth/signup',{name:V('suName').trim(),username:V('suUser').trim().toLowerCase(),email:V('suEmail').trim(),password:V('suPw'),genres:axS.sel.genres,artists:axS.sel.artists,moods:axS.sel.moods});
-      API.user=data.user;
-      axIn(API.user,0);
-      toast('Account created');
-    }else if(r==='forgot'){
-      toast('Password reset requires your mail provider / production email service');
-    }
-  }catch(err){toast(err.message||'Authentication failed')}
-  finally{setBusy(false)}
-},true);
+document.addEventListener('submit',async e=>{if(!API.online||!e.target.closest('#authForm'))return;e.preventDefault();e.stopImmediatePropagation();const r=axS.r,b=$('#authSubmit'),V=id=>$('#'+id)?.value||'',setBusy=x=>{b.disabled=x;b.classList.toggle('loading',x)};try{setBusy(true);if(r==='login'){const data=await apiJson('/api/auth/login',{email:V('authEmail').trim(),password:V('authPw')});API.user=data.user;axIn(API.user,1);toast('Signed in to SONORA Cloud')}else if(r==='signup'){const data=await apiJson('/api/auth/signup',{name:V('suName').trim(),username:V('suUser').trim().toLowerCase(),email:V('suEmail').trim(),password:V('suPw'),genres:axS.sel.genres,artists:axS.sel.artists,moods:axS.sel.moods});API.user=data.user;axIn(API.user,0);toast('Account created')}else if(r==='forgot'){toast('Password reset requires your mail provider / production email service')} }catch(err){toast(err.message||'Authentication failed')}finally{setBusy(false)}},true);
 /* ---- background + extra customization ---- */
 const BGP=[['Mist','#ECECE6','#C8C8C2',140],['Silver','#DDDDD8','#9E9E98',160],['Pearl','#FAFAF6','#D8D8D2',120],['Graphite','#2A2A28','#0A0A0A',135],['Obsidian','#141414','#000000',160],['Warm','#F0EBE0','#C8BEB0',140],['Cool','#E8E8E4','#B8BCC0',140]],
 PRE=[['Default',{bgt:'default',ac:''},'system'],['Midnight',{bgt:'gradient',c1:'#141a2e',c2:'#050505',ang:160,ac:'#3b82f6'},'dark'],['Sunset',{bgt:'gradient',c1:'#f6d5b8',c2:'#e8a0a0',ang:140,ac:'#ff8a00'},'light'],['Neon',{bgt:'gradient',c1:'#1a0b2e',c2:'#000000',ang:150,ac:'#ec4899'},'dark'],['Forest',{bgt:'gradient',c1:'#16301f',c2:'#050a07',ang:155,ac:'#22c55e'},'dark']],
@@ -561,17 +543,13 @@ const sr=(l,k,mn,mx,dv,u,st)=>`<div class="sl"><span>${l}</span><input type="ran
 STYLE_PRE=[['liquid','Liquid Glass'],['glassmorphism','Glassmorphism'],['neumorphism','Neumorphism'],['neobrutalism','Neobrutalism'],['flat','Flat Design'],['minimal','Minimalism'],['skeuo','Skeuomorphism'],['brutal','Brutalist'],['handdrawn','Hand-drawn'],['clay','Claymorphism'],['collage','Collage art'],['maxi','Maximalism'],['retro','Retro']],cust2=()=>`<h2>Visual style</h2><div style="display:flex;gap:8px;flex-wrap:wrap">${STYLE_PRE.map(p=>`<button class="chip${cs.style===p[0]?' on':''}" data-a="xstyle" data-v="${p[0]}">${p[1]}</button>`).join('')}</div><h2>Themes</h2><div style="display:flex;gap:8px;flex-wrap:wrap">${PRE.map((p,i)=>`<button class="chip" data-a="xpre" data-v="${i}">${p[0]}</button>`).join('')}</div><h2>Background</h2><div style="display:flex;gap:8px;flex-wrap:wrap">${[['default','Default'],['solid','Solid'],['gradient','Gradient'],['image','Image'],['artwork','Cover art']].map(x=>cc('bgt',x[0],x[1])).join('')}</div><p class="st" style="margin:12px 0 6px">Presets</p><div style="display:flex;gap:8px;flex-wrap:wrap">${BGP.map((p,i)=>`<button class="chip" data-a="xbgp" data-v="${i}">${p[0]}</button>`).join('')}</div><div class="ip" style="margin-top:12px"><input type="color" value="${hx6(cs.c1)?cs.c1:DCS.c1}" data-cc="c1" aria-label="Color 1"><input type="color" value="${hx6(cs.c2)?cs.c2:DCS.c2}" data-cc="c2" aria-label="Color 2"><button class="btn g" data-a="xpick" data-v="cbgf">Upload image</button><button class="ic" data-a="xcs" data-k="bgi" data-v="" aria-label="Remove image">✕</button></div><input type="file" accept="image/*" hidden id="cbgf" data-img="cbg"><div class="mg" style="max-width:520px">${sr('Angle','ang',0,360,1,'°')}${sr('Blur','bb',0,40,1,'px')}${sr('Brightness','bbr',30,150,100,'',1).replace('step="1"','step="1"')}${sr('Contrast','bct',50,150,100,'')}${sr('Saturation','bsa',0,200,100,'')}${sr('Opacity','bop',10,100,100,'')}${sr('Overlay','bov',0,80,100,'')}${sr('Vignette','bvg',0,90,100,'')}</div><h2>Shape and feel</h2><div class="mg" style="max-width:520px">${sr('Corner radius','rs',0,200,100,'')}${sr('Spacing','gs',40,200,100,'')}${sr('Cursor glow','cg',0,200,100,'')}${sr('Ripple','rpl',0,50,100,'')}</div><p class="st" style="margin:12px 0 6px">Heading font</p><div style="display:flex;gap:8px;flex-wrap:wrap">${['Manrope','Inter','Georgia','ui-monospace'].map(f=>cc('fh',f,f==='ui-monospace'?'Mono':f)).join('')}</div><p class="st" style="margin:12px 0 6px">Body font</p><div style="display:flex;gap:8px;flex-wrap:wrap">${['Inter','Manrope','Georgia','ui-monospace'].map(f=>cc('fb',f,f==='ui-monospace'?'Mono':f)).join('')}</div><h2>Account</h2><p class="st" style="margin-bottom:8px">${E((axSes()||{}).email||'')}</p><button class="btn g" data-a="xlogout">Sign out</button>`;
 
 /* ---- backend boot + remote library ---- */
-(async()=>{await bootAPI();if(API.online){await loadCommunity();await loadRemote();startCloudSync();}})();
-async function loadRemote(){await refreshCommunity(false);if(view==='home'||view==='disc'||view==='lib')render()}
-let cloudPollTimer=0;
-function startCloudSync(){
-  clearInterval(cloudPollTimer);
-  cloudPollTimer=setInterval(()=>{
-    if(document.hidden||!API.online||!API.user)return;
-    refreshCommunity(true);
-  },5000);
+(async()=>{await bootAPI();if(API.online){await loadCommunity();await loadRemote();startCommunitySync();}})();
+async function loadRemote(){await loadCommunity();try{const pr=await apiFetch('/api/playlists');communityPlaylists=pr.playlists||[]}catch(_){}if(view==='home'||view==='disc'||view==='lib')render()}
+let communityPoll=0;
+function startCommunitySync(){
+  clearInterval(communityPoll);
+  communityPoll=setInterval(()=>{if(document.hidden||!API.online)return;loadRemote()},5000);
 }
-
 
 addEventListener('resize',draw);$('#bs').style.opacity=.45;if(LS('dens')==='p')document.body.classList.add('cp');applyTheme();applyCS();cxset(cxo);render();rq();
 idbAll().then(rs=>{rs.forEach(r=>{const t={...r,url:URL.createObjectURL(r.blob),up:1};delete t.blob;delete t.cb;if(r.cb)t.cover=URL.createObjectURL(r.cb);T.push(t);B[t.id]=t});if(rs.length)render()}).then(()=>{const sv=LS('cur');if(sv&&B[sv.id]){q=(sv.q||[]).filter(i=>B[i]);if(!q.includes(sv.id))q=[sv.id];orig=q.slice();load(sv.id,false)}else draw()});
