@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, re, json, hmac, hashlib, secrets, sqlite3, mimetypes, urllib.parse, urllib.error
+import os, re, json, hmac, hashlib, secrets, sqlite3, mimetypes, urllib.parse, urllib.error, base64
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import Request as UrlRequest, urlopen
 from pathlib import Path
@@ -76,7 +76,19 @@ def init_db():
           password_hash TEXT NOT NULL,
           password_salt TEXT NOT NULL,
           google_sub TEXT UNIQUE,
+          avatar_url TEXT DEFAULT '',
+          background_url TEXT DEFAULT '',
+          bio TEXT DEFAULT '',
           created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS follows(
+          follower_id INTEGER NOT NULL,
+          following_id INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(follower_id, following_id),
+          FOREIGN KEY(follower_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY(following_id) REFERENCES users(id) ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS sessions(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -169,10 +181,16 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at);
         ''')
-        try:
-            c.execute('ALTER TABLE users ADD COLUMN google_sub TEXT')
-        except sqlite3.OperationalError:
-            pass
+        for col in (
+            "google_sub TEXT",
+            "avatar_url TEXT DEFAULT ''",
+            "background_url TEXT DEFAULT ''",
+            "bio TEXT DEFAULT ''"
+        ):
+            try:
+                c.execute('ALTER TABLE users ADD COLUMN ' + col)
+            except sqlite3.OperationalError:
+                pass
         for col in ("peaks TEXT DEFAULT ''", "cover TEXT DEFAULT ''"):
             try:
                 c.execute('ALTER TABLE tracks ADD COLUMN ' + col)
@@ -190,8 +208,18 @@ def check_password(password, digest, salt_hex):
     key = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt_hex), n=2**14, r=8, p=1, dklen=64)
     return hmac.compare_digest(key.hex(), digest)
 
-def public_user(row):
-    return {'id': row['id'], 'name': row['name'], 'username': row['username'], 'email': row['email'], 'createdAt': row['created_at']}
+def public_user(row, include_email=True):
+    keys = row.keys() if hasattr(row, 'keys') else []
+    out = {
+        'id': row['id'], 'name': row['name'], 'username': row['username'],
+        'avatarUrl': row['avatar_url'] if 'avatar_url' in keys else '',
+        'backgroundUrl': row['background_url'] if 'background_url' in keys else '',
+        'bio': row['bio'] if 'bio' in keys else '',
+        'createdAt': row['created_at'],
+    }
+    if include_email and 'email' in keys:
+        out['email'] = row['email']
+    return out
 
 def token_hash(token):
     return hashlib.sha256(token.encode()).hexdigest()
@@ -222,7 +250,8 @@ def safe_name(name):
     return stem[:140]
 
 TRACK_SELECT = (
-    "SELECT t.*, u.name AS owner_name, u.username AS owner_username, "
+    "SELECT t.*, u.name AS owner_name, u.username AS owner_username, u.avatar_url AS owner_avatar, "
+    "u.background_url AS owner_background, u.bio AS owner_bio, "
     "(SELECT COUNT(*) FROM comments cm WHERE cm.track_id=t.id) AS comment_count "
     "FROM tracks t JOIN users u ON u.id=t.user_id"
 )
@@ -242,7 +271,10 @@ def track_json(r, base=''):
       'createdAt': r['created_at'], 'streamUrl': f'{base}/api/tracks/{r["id"]}/stream',
       'coverUrl': f'/uploads/{cov}' if cov else '', 'peaks': peaks,
       'owner': {'id': r['user_id'], 'name': r['owner_name'] if 'owner_name' in k else '',
-                'username': r['owner_username'] if 'owner_username' in k else ''}
+                'username': r['owner_username'] if 'owner_username' in k else '',
+                'avatarUrl': r['owner_avatar'] if 'owner_avatar' in k and r['owner_avatar'] else '',
+                'backgroundUrl': r['owner_background'] if 'owner_background' in k and r['owner_background'] else '',
+                'bio': r['owner_bio'] if 'owner_bio' in k and r['owner_bio'] else ''}
     }
 
 def playlist_json(c, r, base='', viewer_id=0):
@@ -250,13 +282,15 @@ def playlist_json(c, r, base='', viewer_id=0):
         "SELECT pt.track_id FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
         "WHERE pt.playlist_id=? AND (t.visibility!='Private' OR t.user_id=?) ORDER BY pt.position",
         (r['id'], viewer_id)).fetchall()
-    own = c.execute('SELECT id,name,username FROM users WHERE id=?', (r['user_id'],)).fetchone()
+    own = c.execute('SELECT id,name,username,avatar_url,background_url,bio FROM users WHERE id=?', (r['user_id'],)).fetchone()
     return {
       'id': r['id'], 'name': r['name'], 'artist': r['artist'], 'description': r['description'],
       'visibility': r['visibility'], 'public': r['visibility'] == 'Public', 'coverUrl': r['cover_url'],
       'backgroundUrl': r['background_url'], 'trackIds': [x['track_id'] for x in tr],
       'createdAt': r['created_at'], 'updatedAt': r['updated_at'],
-      'owner': {'id': own['id'], 'name': own['name'], 'username': own['username']} if own else None
+      'owner': {'id': own['id'], 'name': own['name'], 'username': own['username'],
+                'avatarUrl': own['avatar_url'] or '', 'backgroundUrl': own['background_url'] or '',
+                'bio': own['bio'] or ''} if own else None
     }
 
 def oauth_configured():
@@ -397,6 +431,36 @@ def rate_ok(key,limit=10,window=60):
     if len(a)>=limit: _HITS[key]=a; return False
     a.append(t); _HITS[key]=a; return True
 
+def _image_data_to_file(data_url, prefix, max_bytes=6*1024*1024):
+    if not data_url:
+        return ''
+    if not isinstance(data_url, str) or not data_url.startswith('data:image/'):
+        raise ValueError('Image must be a data URL')
+    try:
+        head, raw = data_url.split(',', 1)
+        mime = head.split(';', 1)[0].split(':', 1)[1].lower()
+        if mime not in ('image/jpeg', 'image/png', 'image/webp', 'image/gif'):
+            raise ValueError('Unsupported image type')
+        blob = base64.b64decode(raw, validate=True)
+    except Exception:
+        raise ValueError('Invalid image data')
+    if len(blob) > max_bytes:
+        raise ValueError('Image is too large')
+    ext = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif'}[mime]
+    name = f'{prefix}_{secrets.token_hex(8)}{ext}'
+    (UPLOAD_DIR / name).write_bytes(blob)
+    return f'/uploads/{name}'
+
+
+def _remove_upload(url):
+    if not url:
+        return
+    name = Path(urllib.parse.urlparse(url).path).name
+    if name.startswith(('cov_', 'avatar_', 'pbg_')):
+        try: (UPLOAD_DIR / name).unlink()
+        except OSError: pass
+
+
 class H(BaseHTTPRequestHandler):
     server_version = 'SONORA/1.0'
     def log_message(self, fmt, *args):
@@ -483,7 +547,13 @@ class H(BaseHTTPRequestHandler):
         if path=='/api/health': return self.json(200,{'ok':True,'service':'sonora','time':now_iso(),'googleOAuthConfigured':oauth_configured()},{'Access-Control-Allow-Origin':'*'})
         if path=='/api/sync' and method=='GET': return self.sync_poll(q)
         if path=='/api/me':
-            u=get_user_from_handler(self); return self.json(200,{'user':u})
+            u=get_user_from_handler(self);
+            if u and method=='GET':
+                with DB_LOCK:
+                    c=db(); row=c.execute('SELECT * FROM users WHERE id=?',(u['id'],)).fetchone(); c.close()
+                u=public_user(row) if row else None
+            return self.json(200,{'user':u})
+        if path=='/api/profile' and method=='PATCH': return self.patch_profile()
         if path=='/api/auth/google' and method=='GET': return self.google_start()
         if path=='/api/auth/google/callback' and method=='GET': return self.google_callback(q)
         if path=='/api/auth/signup' and method=='POST': return self.signup()
@@ -518,6 +588,10 @@ class H(BaseHTTPRequestHandler):
         if m and method=='DELETE': return self.delete_track(int(m.group(1)))
         if path=='/api/playlists' and method=='GET': return self.get_playlists()
         if path=='/api/playlists' and method=='POST': return self.create_playlist()
+        m=re.match(r'^/api/users/([A-Za-z0-9_]+)$',path)
+        if m and method=='GET': return self.get_profile(m.group(1))
+        m=re.match(r'^/api/users/(\d+)/follow$',path)
+        if m and method=='POST': return self.toggle_follow(int(m.group(1)))
         m=re.match(r'^/api/playlists/(\d+)$',path)
         if m and method=='PATCH': return self.patch_playlist(int(m.group(1)))
         if m and method=='DELETE': return self.delete_playlist(int(m.group(1)))
@@ -526,7 +600,7 @@ class H(BaseHTTPRequestHandler):
         if path=='/api/notifications' and method=='GET': return self.get_notifications()
         if path.startswith('/uploads/'):
             name=Path(path.split('/uploads/',1)[1]).name
-            if not name.startswith('cov_'): return self.text(404,'Not found')  # audio is only served via /api/tracks/<id>/stream (respects Private)
+            if not name.startswith(('cov_','avatar_','pbg_')): return self.text(404,'Not found')  # audio is only served via /api/tracks/<id>/stream
             return self.serve_file(UPLOAD_DIR/name)
         self.serve_file(find_index()) if not path.startswith('/api/') else self.json(404,{'error':'Not found'})
 
@@ -643,6 +717,89 @@ class H(BaseHTTPRequestHandler):
         # own token, allowing Edge and Chrome to stay signed into different users.
         token=create_session(row['id'])
         return self.json(200,{'user':public_user(row)},self.set_cookie(token))
+
+    def patch_profile(self):
+        u=require_user(self)
+        if not u: return
+        d=self.parse_json()
+        with DB_LOCK:
+            c=db(); row=c.execute('SELECT * FROM users WHERE id=?',(u['id'],)).fetchone(); c.close()
+        if not row: return self.json(404,{'error':'User not found'})
+        name=str(d.get('name',row['name'])).strip()[:120] or row['name']
+        username=str(d.get('username',row['username'])).strip().lower()[:20] or row['username']
+        if not re.match(r'^[a-z0-9_]{3,20}$',username): return self.json(400,{'error':'Username must be 3-20 characters: a-z, 0-9, _'})
+        bio=str(d.get('bio',row['bio'] or '')).strip()[:500]
+        avatar=row['avatar_url'] or ''
+        background=row['background_url'] or ''
+        try:
+            if 'avatarData' in d:
+                if d.get('avatarData'):
+                    new_avatar=_image_data_to_file(d['avatarData'],'avatar_')
+                    _remove_upload(avatar); avatar=new_avatar
+                else:
+                    _remove_upload(avatar); avatar=''
+            if 'backgroundData' in d:
+                if d.get('backgroundData'):
+                    new_background=_image_data_to_file(d['backgroundData'],'pbg_')
+                    _remove_upload(background); background=new_background
+                else:
+                    _remove_upload(background); background=''
+        except ValueError as e:
+            return self.json(400,{'error':str(e)})
+        with DB_LOCK:
+            c=db()
+            clash=c.execute('SELECT id FROM users WHERE username=? AND id!=?',(username,u['id'])).fetchone()
+            if clash: c.close(); return self.json(409,{'error':'Username already exists'})
+            c.execute('UPDATE users SET name=?,username=?,bio=?,avatar_url=?,background_url=? WHERE id=?',(name,username,bio,avatar,background,u['id']))
+            c.commit(); row=c.execute('SELECT * FROM users WHERE id=?',(u['id'],)).fetchone(); c.close()
+        bump()
+        return self.json(200,{'user':public_user(row)})
+
+    def get_profile(self, key):
+        viewer=get_user_from_handler(self)
+        with DB_LOCK:
+            c=db()
+            if str(key).isdigit(): row=c.execute('SELECT * FROM users WHERE id=?',(int(key),)).fetchone()
+            else: row=c.execute('SELECT * FROM users WHERE username=?',(str(key).lower(),)).fetchone()
+            if not row:
+                c.close(); return self.json(404,{'error':'Profile not found'})
+            uid=row['id']; is_owner=bool(viewer and int(viewer['id'])==int(uid))
+            track_clause='t.user_id=?' if is_owner else 't.user_id=? AND t.visibility IN ("Public","Unlisted")'
+            tracks=c.execute(TRACK_SELECT+f' WHERE {track_clause} ORDER BY t.created_at DESC LIMIT 200',(uid,)).fetchall()
+            pl_clause='p.user_id=?' if is_owner else 'p.user_id=? AND p.visibility IN ("Public","Unlisted")'
+            pls=c.execute(f'SELECT p.* FROM playlists p WHERE {pl_clause} ORDER BY p.updated_at DESC LIMIT 200',(uid,)).fetchall()
+            followers=c.execute('SELECT COUNT(*) n FROM follows WHERE following_id=?',(uid,)).fetchone()['n']
+            following=c.execute('SELECT COUNT(*) n FROM follows WHERE follower_id=?',(uid,)).fetchone()['n']
+            follows_me=bool(viewer and c.execute('SELECT 1 FROM follows WHERE follower_id=? AND following_id=?',(viewer['id'],uid)).fetchone())
+            total_plays=c.execute('SELECT COALESCE(SUM(play_count),0) n FROM tracks WHERE user_id=? AND visibility IN ("Public","Unlisted")',(uid,)).fetchone()['n']
+            data={
+                'user':public_user(row, include_email=is_owner),
+                'viewerIsOwner':is_owner, 'following':follows_me,
+                'followers':followers, 'followingCount':following, 'trackCount':len(tracks), 'playlistCount':len(pls), 'playCount':total_plays,
+                'tracks':[track_json(x,'') for x in tracks],
+                'playlists':[playlist_json(c,x,'',viewer['id'] if viewer else 0) for x in pls]
+            }
+            c.close()
+        return self.json(200,{'profile':data})
+
+    def toggle_follow(self, target_id):
+        u=require_user(self)
+        if not u: return
+        if int(target_id)==int(u['id']): return self.json(400,{'error':'You cannot follow yourself'})
+        with DB_LOCK:
+            c=db(); target=c.execute('SELECT id,name FROM users WHERE id=?',(target_id,)).fetchone()
+            if not target: c.close(); return self.json(404,{'error':'User not found'})
+            exists=c.execute('SELECT 1 FROM follows WHERE follower_id=? AND following_id=?',(u['id'],target_id)).fetchone()
+            if exists:
+                c.execute('DELETE FROM follows WHERE follower_id=? AND following_id=?',(u['id'],target_id)); following=False
+            else:
+                c.execute('INSERT INTO follows(follower_id,following_id,created_at) VALUES(?,?,?)',(u['id'],target_id,now_iso())); following=True
+                if target_id!=u['id']:
+                    c.execute('INSERT INTO notifications(user_id,type,title,body,created_at) VALUES(?,?,?,?,?)',(target_id,'follow','New follower',f'{u["name"]} followed you',now_iso()))
+            count=c.execute('SELECT COUNT(*) n FROM follows WHERE following_id=?',(target_id,)).fetchone()['n']
+            c.commit(); c.close()
+        bump()
+        return self.json(200,{'following':following,'followers':count})
 
     def visible_track_clause(self,u):
         if u: return '(t.visibility="Public" OR t.visibility="Unlisted" OR t.user_id=?)', [u['id']]
