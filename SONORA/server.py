@@ -29,6 +29,14 @@ OAUTH_STATE_TTL = int(os.environ.get('OAUTH_STATE_TTL_SECONDS', '600'))
 
 DB_LOCK = __import__('threading').RLock()
 
+def find_index():
+    # Serve the newest index*.html next to this script, so there is no need to rename files.
+    env = os.environ.get('SONORA_INDEX', '').strip()
+    if env and (ROOT / env).is_file():
+        return ROOT / env
+    cands = sorted(ROOT.glob('index*.html'), key=lambda p: p.stat().st_mtime, reverse=True)
+    return cands[0] if cands else ROOT / 'index.html'
+
 # ---- live sync: every write bumps a revision; clients long-poll /api/sync ----
 import threading
 BOOT = secrets.token_hex(3)
@@ -470,9 +478,9 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
     def route(self,method):
         p=urllib.parse.urlparse(self.path); path=p.path; q=urllib.parse.parse_qs(p.query)
-        if path=='/': return self.serve_file(ROOT/'index.html')
+        if path in ('/','/index.html'): return self.serve_file(find_index())
         if path=='/favicon.ico': return self.text(204,'')
-        if path=='/api/health': return self.json(200,{'ok':True,'service':'sonora','time':now_iso(),'googleOAuthConfigured':oauth_configured()})
+        if path=='/api/health': return self.json(200,{'ok':True,'service':'sonora','time':now_iso(),'googleOAuthConfigured':oauth_configured()},{'Access-Control-Allow-Origin':'*'})
         if path=='/api/sync' and method=='GET': return self.sync_poll(q)
         if path=='/api/me':
             u=get_user_from_handler(self); return self.json(200,{'user':u})
@@ -520,12 +528,14 @@ class H(BaseHTTPRequestHandler):
             name=Path(path.split('/uploads/',1)[1]).name
             if not name.startswith('cov_'): return self.text(404,'Not found')  # audio is only served via /api/tracks/<id>/stream (respects Private)
             return self.serve_file(UPLOAD_DIR/name)
-        self.serve_file(ROOT/'index.html') if not path.startswith('/api/') else self.json(404,{'error':'Not found'})
+        self.serve_file(find_index()) if not path.startswith('/api/') else self.json(404,{'error':'Not found'})
 
     def serve_file(self,path):
         if not path.exists() or not path.is_file(): return self.text(404,'Not found')
         ctype=mimetypes.guess_type(str(path))[0] or 'application/octet-stream'; size=path.stat().st_size
-        self.send_response(200); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(size)); self.end_headers()
+        self.send_response(200); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(size))
+        if ctype.startswith('text/html'): self.send_header('Cache-Control','no-cache')
+        self.end_headers()
         with path.open('rb') as f:
             while True:
                 b=f.read(1024*1024)
@@ -874,6 +884,7 @@ class H(BaseHTTPRequestHandler):
 
 init_db()
 print(f'SONORA server listening on http://127.0.0.1:{PORT} (data: {DATA_DIR})')
+print(f'Open SONORA at: http://localhost:{PORT}/   (page: {find_index().name})')
 ThreadingHTTPServer.allow_reuse_address=True
 httpd=ThreadingHTTPServer((HOST,PORT),H)
 httpd.serve_forever()
