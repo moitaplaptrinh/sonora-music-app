@@ -130,6 +130,15 @@ def init_db():
           read_at TEXT,
           FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS events(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, title TEXT NOT NULL, kind TEXT DEFAULT 'Meetup',
+          place TEXT DEFAULT '', description TEXT DEFAULT '', starts_at TEXT NOT NULL, created_at TEXT NOT NULL,
+          FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS event_rsvps(
+          event_id INTEGER NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY(event_id,user_id),
+          FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
         CREATE INDEX IF NOT EXISTS idx_tracks_visibility ON tracks(visibility, created_at);
         CREATE INDEX IF NOT EXISTS idx_comments_track ON comments(track_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient_id, created_at);
@@ -332,6 +341,12 @@ def google_get_or_create_user(profile):
         c.close()
         return row
 
+_HITS={}
+def rate_ok(key,limit=10,window=60):
+    t=datetime.now(timezone.utc).timestamp(); a=[x for x in _HITS.get(key,[]) if t-x<window]
+    if len(a)>=limit: _HITS[key]=a; return False
+    a.append(t); _HITS[key]=a; return True
+
 class H(BaseHTTPRequestHandler):
     server_version = 'SONORA/1.0'
     def log_message(self, fmt, *args):
@@ -394,8 +409,11 @@ class H(BaseHTTPRequestHandler):
         try: self.route('PATCH')
         except ValueError as e: self.json(400,{'error':str(e)})
         except Exception as e: print('PATCH error',repr(e)); self.json(500,{'error':'Internal server error'})
+    def do_DELETE(self):
+        try: self.route('DELETE')
+        except Exception as e: print('DELETE error',repr(e)); self.json(500,{'error':'Internal server error'})
     def do_OPTIONS(self):
-        self.send_response(204); self.send_header('Access-Control-Allow-Origin',self.headers.get('Origin','*')); self.send_header('Access-Control-Allow-Credentials','true'); self.send_header('Access-Control-Allow-Headers','Content-Type'); self.send_header('Access-Control-Allow-Methods','GET,POST,PATCH,OPTIONS'); self.end_headers()
+        self.send_response(204); self.send_header('Access-Control-Allow-Origin',self.headers.get('Origin','*')); self.send_header('Access-Control-Allow-Credentials','true'); self.send_header('Access-Control-Allow-Headers','Content-Type'); self.send_header('Access-Control-Allow-Methods','GET,POST,PATCH,DELETE,OPTIONS'); self.end_headers()
     def route(self,method):
         p=urllib.parse.urlparse(self.path); path=p.path; q=urllib.parse.parse_qs(p.query)
         if path=='/': return self.serve_file(ROOT/'index.html')
@@ -429,6 +447,12 @@ class H(BaseHTTPRequestHandler):
         m=re.match(r'^/api/tracks/(\d+)/comments$',path)
         if m and method=='GET': return self.get_comments(int(m.group(1)))
         if m and method=='POST': return self.add_comment(int(m.group(1)))
+        if path=='/api/events' and method=='GET': return self.get_events()
+        if path=='/api/events' and method=='POST': return self.create_event()
+        m=re.match(r'^/api/events/(\d+)/rsvp$',path)
+        if m and method=='POST': return self.rsvp_event(int(m.group(1)))
+        m=re.match(r'^/api/tracks/(\d+)$',path)
+        if m and method=='DELETE': return self.delete_track(int(m.group(1)))
         if path=='/api/playlists' and method=='GET': return self.get_playlists()
         if path=='/api/playlists' and method=='POST': return self.create_playlist()
         m=re.match(r'^/api/playlists/(\d+)$',path)
@@ -529,7 +553,7 @@ class H(BaseHTTPRequestHandler):
 
     def signup(self):
         d=self.parse_json(); name=str(d.get('name','')).strip(); username=str(d.get('username','')).strip().lower(); email=str(d.get('email','')).strip().lower(); password=str(d.get('password',''))
-        if len(name)<2 or not re.match(r'^[a-z0-9_]{3,20}$',username) or not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$',email) or len(password)<8: return self.json(400,{'error':'Invalid account fields'})
+        if len(name)<2 or not re.match(r'^[a-z0-9_]{3,20}$',username) or not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$',email) or len(password)<8: return self.json(400,{'error':'Check your details: name 2+ chars, username 3-20 (a-z, 0-9, _), a valid email, password 8+ chars'})
         digest,salt=scrypt_hash(password)
         try:
             with DB_LOCK:
@@ -540,6 +564,7 @@ class H(BaseHTTPRequestHandler):
         return self.json(201,{'user':public_user(row)},self.set_cookie(token))
 
     def login(self):
+        if not rate_ok('login:'+self.client_address[0]): return self.json(429,{'error':'Too many attempts. Wait a minute and try again.'})
         d=self.parse_json(); email=str(d.get('email','')).strip().lower(); password=str(d.get('password',''))
         with DB_LOCK: c=db(); row=c.execute('SELECT * FROM users WHERE email=?',(email,)).fetchone(); c.close()
         if not row or not check_password(password,row['password_hash'],row['password_salt']): return self.json(401,{'error':'Invalid email or password'})
@@ -691,6 +716,50 @@ class H(BaseHTTPRequestHandler):
         with DB_LOCK:
             c=db(); rows=c.execute('SELECT * FROM notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 100',(u['id'],)).fetchall(); c.close()
         return self.json(200,{'notifications':[{'id':x['id'],'type':x['type'],'title':x['title'],'text':x['body'],'body':x['body'],'createdAt':x['created_at']} for x in rows]})
+
+    def get_events(self):
+        u=get_user_from_handler(self); uid=u['id'] if u else 0
+        cut=(datetime.now(timezone.utc)-__import__('datetime').timedelta(days=1)).isoformat()
+        with DB_LOCK:
+            c=db(); rows=c.execute('SELECT e.*,u.name host,(SELECT COUNT(*) FROM event_rsvps r WHERE r.event_id=e.id) going,(SELECT COUNT(*) FROM event_rsvps r WHERE r.event_id=e.id AND r.user_id=?) me FROM events e JOIN users u ON u.id=e.user_id WHERE e.starts_at>=? ORDER BY e.starts_at LIMIT 100',(uid,cut)).fetchall(); c.close()
+        return self.json(200,{'events':[{'id':x['id'],'title':x['title'],'kind':x['kind'],'place':x['place'],'description':x['description'],'startsAt':x['starts_at'],'host':x['host'],'going':x['going'],'me':bool(x['me'])} for x in rows]})
+
+    def create_event(self):
+        u=require_user(self)
+        if not u: return
+        d=self.parse_json(); title=str(d.get('title','')).strip()[:80]; kind=str(d.get('kind','Meetup'))[:30]
+        if kind not in ('Listening party','Live set','Release','Meetup','Workshop'): kind='Meetup'
+        try: starts=datetime.fromisoformat(str(d.get('startsAt','')).replace('Z','+00:00')).astimezone(timezone.utc).isoformat()
+        except Exception: return self.json(400,{'error':'Pick a valid date and time'})
+        if not title: return self.json(400,{'error':'Event title is required'})
+        if not rate_ok('event:%s'%u['id'],10,3600): return self.json(429,{'error':'Event limit reached, try later'})
+        with DB_LOCK:
+            c=db(); cur=c.execute('INSERT INTO events(user_id,title,kind,place,description,starts_at,created_at) VALUES(?,?,?,?,?,?,?)',(u['id'],title,kind,str(d.get('place',''))[:80],str(d.get('description',''))[:300],starts,now_iso())); c.execute('INSERT OR IGNORE INTO event_rsvps VALUES(?,?)',(cur.lastrowid,u['id'])); c.commit(); c.close()
+        return self.json(201,{'ok':True})
+
+    def rsvp_event(self,eid):
+        u=require_user(self)
+        if not u: return
+        with DB_LOCK:
+            c=db(); ev=c.execute('SELECT user_id,title FROM events WHERE id=?',(eid,)).fetchone()
+            if not ev: c.close(); return self.json(404,{'error':'Event not found'})
+            if c.execute('SELECT 1 FROM event_rsvps WHERE event_id=? AND user_id=?',(eid,u['id'])).fetchone(): c.execute('DELETE FROM event_rsvps WHERE event_id=? AND user_id=?',(eid,u['id'])); going=False
+            else:
+                c.execute('INSERT INTO event_rsvps VALUES(?,?)',(eid,u['id'])); going=True
+                if ev['user_id']!=u['id']: c.execute('INSERT INTO notifications(user_id,type,title,body,created_at) VALUES(?,?,?,?,?)',(ev['user_id'],'event','New RSVP',f"{u['name']} is going to {ev['title']}",now_iso()))
+            c.commit(); c.close()
+        return self.json(200,{'going':going})
+
+    def delete_track(self,tid):
+        u=require_user(self)
+        if not u: return
+        with DB_LOCK:
+            c=db(); r=c.execute('SELECT filename FROM tracks WHERE id=? AND user_id=?',(tid,u['id'])).fetchone()
+            if not r: c.close(); return self.json(404,{'error':'Track not found'})
+            c.execute('DELETE FROM tracks WHERE id=?',(tid,)); c.commit(); c.close()
+        try: (UPLOAD_DIR/r['filename']).unlink()
+        except OSError: pass
+        return self.json(200,{'ok':True})
 
 init_db()
 print(f'SONORA server listening on http://127.0.0.1:{PORT} (data: {DATA_DIR})')
