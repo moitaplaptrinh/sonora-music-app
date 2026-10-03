@@ -34,7 +34,10 @@ def find_index():
     env = os.environ.get('SONORA_INDEX', '').strip()
     if env and (ROOT / env).is_file():
         return ROOT / env
-    cands = sorted(ROOT.glob('index*.html'), key=lambda p: p.stat().st_mtime, reverse=True)
+    cands = []
+    for pat in ('index*.html','sonora*.html'):
+        cands.extend(ROOT.glob(pat))
+    cands = sorted({p.resolve() for p in cands if p.is_file()}, key=lambda p: p.stat().st_mtime, reverse=True)
     return cands[0] if cands else ROOT / 'index.html'
 
 # ---- live sync: every write bumps a revision; clients long-poll /api/sync ----
@@ -588,6 +591,7 @@ class H(BaseHTTPRequestHandler):
         if m and method=='DELETE': return self.delete_track(int(m.group(1)))
         if path=='/api/playlists' and method=='GET': return self.get_playlists()
         if path=='/api/playlists' and method=='POST': return self.create_playlist()
+        if path=='/api/search' and method=='GET': return self.search(q)
         m=re.match(r'^/api/users/([A-Za-z0-9_]+)$',path)
         if m and method=='GET': return self.get_profile(m.group(1))
         m=re.match(r'^/api/users/(\d+)/follow$',path)
@@ -800,6 +804,30 @@ class H(BaseHTTPRequestHandler):
             c.commit(); c.close()
         bump()
         return self.json(200,{'following':following,'followers':count})
+
+    def search(self, q):
+        term=str((q.get('q') or [''])[0]).strip()
+        try: limit=max(1,min(50,int((q.get('limit') or ['50'])[0])))
+        except: limit=50
+        if not term:
+            return self.json(200,{'tracks':[],'playlists':[],'users':[]})
+        like='%'+term.replace('!', '!!').replace('%','!%').replace('_','!_')+'%'
+        viewer=get_user_from_handler(self)
+        with DB_LOCK:
+            c=db()
+            track_clause='(t.visibility IN ("Public","Unlisted") OR t.user_id=?)' if viewer else 't.visibility IN ("Public","Unlisted")'
+            targs=[like,like,like,like,like,like]
+            if viewer: targs.append(viewer['id'])
+            trows=c.execute(TRACK_SELECT+f" WHERE (t.title LIKE ? ESCAPE '!' OR t.artist LIKE ? ESCAPE '!' OR t.album LIKE ? ESCAPE '!' OR t.tags LIKE ? ESCAPE '!' OR u.name LIKE ? ESCAPE '!' OR u.username LIKE ? ESCAPE '!') AND {track_clause} ORDER BY t.created_at DESC LIMIT {limit}",tuple(targs)).fetchall()
+            prows=c.execute("SELECT p.*,u.id AS owner_id,u.name AS owner_name,u.username AS owner_username,u.avatar_url AS owner_avatar,u.background_url AS owner_background,u.bio AS owner_bio FROM playlists p JOIN users u ON u.id=p.user_id WHERE (p.name LIKE ? ESCAPE '!' OR p.description LIKE ? ESCAPE '!') AND (p.visibility IN ('Public','Unlisted') OR p.user_id=?) ORDER BY p.updated_at DESC LIMIT "+str(limit),(like,like,viewer['id'] if viewer else -1)).fetchall()
+            urows=c.execute('''SELECT u.*, (SELECT COUNT(*) FROM tracks t WHERE t.user_id=u.id AND t.visibility IN ('Public','Unlisted')) AS track_count,
+                                  (SELECT COUNT(*) FROM playlists p WHERE p.user_id=u.id AND p.visibility IN ('Public','Unlisted')) AS playlist_count
+                               FROM users u WHERE u.name LIKE ? ESCAPE '!' OR u.username LIKE ? ESCAPE '!' ORDER BY CASE WHEN lower(u.username)=lower(?) THEN 0 WHEN lower(u.name)=lower(?) THEN 1 ELSE 2 END, u.name LIMIT '''+str(limit),(like,like,term,term)).fetchall()
+            data={'tracks':[track_json(r,'') for r in trows],
+                  'playlists':[playlist_json(c,r,'',viewer['id'] if viewer else 0) for r in prows],
+                  'users':[dict(public_user(r, include_email=False),trackCount=r['track_count'],playlistCount=r['playlist_count']) for r in urows]}
+            c.close()
+        return self.json(200,data)
 
     def visible_track_clause(self,u):
         if u: return '(t.visibility="Public" OR t.visibility="Unlisted" OR t.user_id=?)', [u['id']]
