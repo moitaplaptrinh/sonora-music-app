@@ -29,6 +29,23 @@ OAUTH_STATE_TTL = int(os.environ.get('OAUTH_STATE_TTL_SECONDS', '600'))
 
 DB_LOCK = __import__('threading').RLock()
 
+# ---- live sync: every write bumps a revision; clients long-poll /api/sync ----
+import threading
+BOOT = secrets.token_hex(3)
+SYNC_COND = threading.Condition()
+SYNC_REV = [0]
+def sync_token():
+    return f'{BOOT}.{SYNC_REV[0]}'
+def bump():
+    with SYNC_COND:
+        SYNC_REV[0] += 1
+        SYNC_COND.notify_all()
+def sync_wait(since, timeout):
+    with SYNC_COND:
+        if since == sync_token():
+            SYNC_COND.wait(timeout)
+        return sync_token()
+
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -148,6 +165,11 @@ def init_db():
             c.execute('ALTER TABLE users ADD COLUMN google_sub TEXT')
         except sqlite3.OperationalError:
             pass
+        for col in ("peaks TEXT DEFAULT ''", "cover TEXT DEFAULT ''"):
+            try:
+                c.execute('ALTER TABLE tracks ADD COLUMN ' + col)
+            except sqlite3.OperationalError:
+                pass
         c.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub)')
         c.commit(); c.close()
 
@@ -191,28 +213,43 @@ def safe_name(name):
     stem = re.sub(r'[^A-Za-z0-9._-]+','_', name).strip('._') or 'audio'
     return stem[:140]
 
+TRACK_SELECT = (
+    "SELECT t.*, u.name AS owner_name, u.username AS owner_username, "
+    "(SELECT COUNT(*) FROM comments cm WHERE cm.track_id=t.id) AS comment_count "
+    "FROM tracks t JOIN users u ON u.id=t.user_id"
+)
+
 def track_json(r, base=''):
-    owner_id = r['user_id'] if 'user_id' in r.keys() else None
-    owner = None
-    if owner_id is not None and 'owner_name' in r.keys():
-        owner = {'id': owner_id, 'name': r['owner_name'], 'username': r['owner_username']}
+    k = r.keys()
+    try:
+        peaks = json.loads(r['peaks']) if 'peaks' in k and r['peaks'] else []
+    except Exception:
+        peaks = []
+    cov = r['cover'] if 'cover' in k and r['cover'] else ''
     return {
       'id': r['id'], 'serverId': r['id'], 'title': r['title'], 'artist': r['artist'], 'album': r['album'],
       'genre': r['genre'], 'tags': r['tags'], 'visibility': r['visibility'], 'explicit': bool(r['explicit']),
-      'duration': r['duration'], 'playCount': r['play_count'], 'commentCount': r['comment_count'] if 'comment_count' in r.keys() else 0,
-      'createdAt': r['created_at'], 'streamUrl': f'{base}/api/tracks/{r["id"]}/stream', 'coverUrl': '', 'peaks': [],
-      'owner': owner
+      'duration': r['duration'], 'size': r['size_bytes'], 'playCount': r['play_count'],
+      'commentCount': r['comment_count'] if 'comment_count' in k else 0,
+      'createdAt': r['created_at'], 'streamUrl': f'{base}/api/tracks/{r["id"]}/stream',
+      'coverUrl': f'/uploads/{cov}' if cov else '', 'peaks': peaks,
+      'owner': {'id': r['user_id'], 'name': r['owner_name'] if 'owner_name' in k else '',
+                'username': r['owner_username'] if 'owner_username' in k else ''}
     }
 
-def playlist_json(c, r, base=''):
-    tr = c.execute('SELECT track_id FROM playlist_tracks WHERE playlist_id=? ORDER BY position',(r['id'],)).fetchall()
+def playlist_json(c, r, base='', viewer_id=0):
+    tr = c.execute(
+        "SELECT pt.track_id FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
+        "WHERE pt.playlist_id=? AND (t.visibility!='Private' OR t.user_id=?) ORDER BY pt.position",
+        (r['id'], viewer_id)).fetchall()
+    own = c.execute('SELECT id,name,username FROM users WHERE id=?', (r['user_id'],)).fetchone()
     return {
       'id': r['id'], 'name': r['name'], 'artist': r['artist'], 'description': r['description'],
-      'visibility': r['visibility'], 'public': r['visibility']=='Public', 'coverUrl': r['cover_url'],
-      'backgroundUrl': r['background_url'], 'trackIds':[x['track_id'] for x in tr], 'createdAt':r['created_at'], 'updatedAt':r['updated_at'],
-      'owner': {'id':r['user_id']} if r['user_id'] else None
+      'visibility': r['visibility'], 'public': r['visibility'] == 'Public', 'coverUrl': r['cover_url'],
+      'backgroundUrl': r['background_url'], 'trackIds': [x['track_id'] for x in tr],
+      'createdAt': r['created_at'], 'updatedAt': r['updated_at'],
+      'owner': {'id': own['id'], 'name': own['name'], 'username': own['username']} if own else None
     }
-
 
 def oauth_configured():
     return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI)
@@ -397,18 +434,22 @@ class H(BaseHTTPRequestHandler):
         return out,files
     def set_cookie(self, token, max_age=2592000):
         secure='; Secure' if COOKIE_SECURE else ''
-        return {'Set-Cookie':f'sonora_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}'}
-    def clear_cookie(self): return {'Set-Cookie':'sonora_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'}
+        # One browser gets one cookie value; the server keeps every active session
+        # as a separate row, so another browser/account is never logged out here.
+        value=f'sonora_session={urllib.parse.quote(token, safe="")}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}'
+        return {'Set-Cookie':value}
+    def clear_cookie(self):
+        return {'Set-Cookie':'sonora_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'}
 
     def do_GET(self):
         try: self.route('GET')
         except ValueError as e: self.json(400,{'error':str(e)})
-        except BrokenPipeError: pass
+        except (BrokenPipeError, ConnectionResetError): pass
         except Exception as e: print('GET error',repr(e)); self.json(500,{'error':'Internal server error'})
     def do_POST(self):
         try: self.route('POST')
         except ValueError as e: self.json(400,{'error':str(e)})
-        except BrokenPipeError: pass
+        except (BrokenPipeError, ConnectionResetError): pass
         except Exception as e: print('POST error',repr(e)); self.json(500,{'error':'Internal server error'})
     def do_PATCH(self):
         try: self.route('PATCH')
@@ -418,12 +459,21 @@ class H(BaseHTTPRequestHandler):
         try: self.route('DELETE')
         except Exception as e: print('DELETE error',repr(e)); self.json(500,{'error':'Internal server error'})
     def do_OPTIONS(self):
-        self.send_response(204); self.send_header('Access-Control-Allow-Origin',self.headers.get('Origin','*')); self.send_header('Access-Control-Allow-Credentials','true'); self.send_header('Access-Control-Allow-Headers','Content-Type'); self.send_header('Access-Control-Allow-Methods','GET,POST,PATCH,DELETE,OPTIONS'); self.end_headers()
+        origin=self.headers.get('Origin')
+        self.send_response(204)
+        if origin:
+            self.send_header('Access-Control-Allow-Origin',origin)
+            self.send_header('Vary','Origin')
+        self.send_header('Access-Control-Allow-Credentials','true')
+        self.send_header('Access-Control-Allow-Headers','Content-Type')
+        self.send_header('Access-Control-Allow-Methods','GET,POST,PATCH,DELETE,OPTIONS')
+        self.end_headers()
     def route(self,method):
         p=urllib.parse.urlparse(self.path); path=p.path; q=urllib.parse.parse_qs(p.query)
         if path=='/': return self.serve_file(ROOT/'index.html')
         if path=='/favicon.ico': return self.text(204,'')
         if path=='/api/health': return self.json(200,{'ok':True,'service':'sonora','time':now_iso(),'googleOAuthConfigured':oauth_configured()})
+        if path=='/api/sync' and method=='GET': return self.sync_poll(q)
         if path=='/api/me':
             u=get_user_from_handler(self); return self.json(200,{'user':u})
         if path=='/api/auth/google' and method=='GET': return self.google_start()
@@ -443,7 +493,6 @@ class H(BaseHTTPRequestHandler):
             if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$',email): return self.json(400,{'ok':False,'error':'Invalid email'})
             return self.json(200,{'ok':True,'message':'Reset email service is not configured in this starter build.'})
         if path=='/api/recommendations' and method=='GET': return self.tracks()
-        if path=='/api/community/tracks' and method=='GET': return self.community_tracks()
         if path=='/api/tracks' and method=='GET': return self.tracks()
         if path=='/api/tracks' and method=='POST': return self.upload_track()
         m=re.match(r'^/api/tracks/(\d+)/stream$',path)
@@ -463,11 +512,13 @@ class H(BaseHTTPRequestHandler):
         if path=='/api/playlists' and method=='POST': return self.create_playlist()
         m=re.match(r'^/api/playlists/(\d+)$',path)
         if m and method=='PATCH': return self.patch_playlist(int(m.group(1)))
+        if m and method=='DELETE': return self.delete_playlist(int(m.group(1)))
         if path=='/api/messages' and method=='GET': return self.get_messages()
         if path=='/api/messages' and method=='POST': return self.send_message()
         if path=='/api/notifications' and method=='GET': return self.get_notifications()
         if path.startswith('/uploads/'):
             name=Path(path.split('/uploads/',1)[1]).name
+            if not name.startswith('cov_'): return self.text(404,'Not found')  # audio is only served via /api/tracks/<id>/stream (respects Private)
             return self.serve_file(UPLOAD_DIR/name)
         self.serve_file(ROOT/'index.html') if not path.startswith('/api/') else self.json(404,{'error':'Not found'})
 
@@ -572,8 +623,14 @@ class H(BaseHTTPRequestHandler):
     def login(self):
         if not rate_ok('login:'+self.client_address[0]): return self.json(429,{'error':'Too many attempts. Wait a minute and try again.'})
         d=self.parse_json(); email=str(d.get('email','')).strip().lower(); password=str(d.get('password',''))
-        with DB_LOCK: c=db(); row=c.execute('SELECT * FROM users WHERE email=?',(email,)).fetchone(); c.close()
-        if not row or not check_password(password,row['password_hash'],row['password_salt']): return self.json(401,{'error':'Invalid email or password'})
+        with DB_LOCK:
+            c=db()
+            row=c.execute('SELECT * FROM users WHERE email=?',(email,)).fetchone()
+            c.close()
+        if not row or not check_password(password,row['password_hash'],row['password_salt']):
+            return self.json(401,{'error':'Invalid email or password'})
+        # IMPORTANT: do not delete/replace another session. Each login creates its
+        # own token, allowing Edge and Chrome to stay signed into different users.
         token=create_session(row['id'])
         return self.json(200,{'user':public_user(row)},self.set_cookie(token))
 
@@ -582,47 +639,12 @@ class H(BaseHTTPRequestHandler):
         return '(t.visibility="Public")', []
 
     def tracks(self):
-        u=get_user_from_handler(self)
-        qs=urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-        limit=max(1,min(int(qs.get('limit',['50'])[0]),200))
-        sort=qs.get('sort',['popular'])[0]
+        u=get_user_from_handler(self); qs=urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query); limit=max(1,min(int(qs.get('limit',['50'])[0]),1000)); sort=qs.get('sort',['popular'])[0]
         clause,args=self.visible_track_clause(u)
         order='t.play_count DESC, t.created_at DESC' if sort=='popular' else 't.created_at DESC'
         with DB_LOCK:
-            c=db()
-            rows=c.execute(f'''
-                SELECT t.*,
-                       (SELECT COUNT(*) FROM comments cm WHERE cm.track_id=t.id) AS comment_count,
-                       u.name AS owner_name, u.username AS owner_username
-                FROM tracks t
-                JOIN users u ON u.id=t.user_id
-                WHERE {clause}
-                ORDER BY {order}
-                LIMIT ?
-            ''',args+[limit]).fetchall()
-            c.close()
-        return self.json(200,{'tracks':[track_json(r,'') for r in rows]})
-
-    def community_tracks(self):
-        # Public community feed: deliberately independent of the current session.
-        qs=urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-        limit=max(1,min(int(qs.get('limit',['100'])[0]),200))
-        sort=qs.get('sort',['newest'])[0]
-        order='t.play_count DESC, t.created_at DESC' if sort=='popular' else 't.created_at DESC'
-        with DB_LOCK:
-            c=db()
-            rows=c.execute(f'''
-                SELECT t.*,
-                       (SELECT COUNT(*) FROM comments cm WHERE cm.track_id=t.id) AS comment_count,
-                       u.name AS owner_name, u.username AS owner_username
-                FROM tracks t
-                JOIN users u ON u.id=t.user_id
-                WHERE t.visibility='Public'
-                ORDER BY {order}
-                LIMIT ?
-            ''',(limit,)).fetchall()
-            c.close()
-        return self.json(200,{'tracks':[track_json(r,'') for r in rows]})
+            c=db(); rows=c.execute(f"{TRACK_SELECT} WHERE {clause} ORDER BY {order} LIMIT ?",args+[limit]).fetchall(); c.close()
+        base=''; return self.json(200,{'tracks':[track_json(r,base) for r in rows]})
 
     def upload_track(self):
         u=require_user(self)
@@ -634,18 +656,25 @@ class H(BaseHTTPRequestHandler):
         artist=str(fields.get('artist','')).strip() or u['name']; album=str(fields.get('album','')).strip(); genre=str(fields.get('genre','')).strip(); tags=str(fields.get('tags','')).strip(); vis=str(fields.get('visibility','Public')).title(); explicit=1 if str(fields.get('explicit','false')).lower() in ('1','true','yes') else 0
         if vis not in ('Public','Unlisted','Private'): vis='Public'
         safe=safe_name(f['filename']); unique=f'{secrets.token_hex(8)}_{safe}'; path=UPLOAD_DIR/unique; path.write_bytes(f['data'])
+        try: dur=max(0.0,min(float(fields.get('duration','0') or 0),86400.0))
+        except ValueError: dur=0.0
+        try:
+            pk=json.loads(fields.get('peaks','[]') or '[]')
+            pk=[round(float(x),3) for x in pk][:400] if isinstance(pk,list) else []
+        except Exception: pk=[]
+        cover_name=''
+        cf=files.get('cover')
+        if cf and cf['data'] and len(cf['data'])<=8*1024*1024:
+            ext={'image/jpeg':'.jpg','image/png':'.png','image/webp':'.webp','image/gif':'.gif'}.get((cf['content_type'] or '').split(';')[0].strip().lower())
+            if ext:
+                cover_name=f'cov_{secrets.token_hex(8)}{ext}'; (UPLOAD_DIR/cover_name).write_bytes(cf['data'])
         with DB_LOCK:
-            c=db()
-            cur=c.execute('INSERT INTO tracks(user_id,title,artist,album,genre,tags,visibility,explicit,filename,mime,size_bytes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(u['id'],title,artist,album,genre,tags,vis,explicit,unique,f['content_type'],len(f['data']),now_iso()))
-            tid=cur.lastrowid
-            c.commit()
-            row=c.execute('''SELECT t.*, 0 AS comment_count, u.name AS owner_name, u.username AS owner_username
-                             FROM tracks t JOIN users u ON u.id=t.user_id WHERE t.id=?''',(tid,)).fetchone()
-            c.close()
-        out=track_json(row,''); out['streamUrl']=f'/api/tracks/{tid}/stream'; return self.json(201,{'track':out})
+            c=db(); cur=c.execute('INSERT INTO tracks(user_id,title,artist,album,genre,tags,visibility,explicit,filename,mime,size_bytes,duration,peaks,cover,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(u['id'],title,artist,album,genre,tags,vis,explicit,unique,f['content_type'],len(f['data']),dur,json.dumps(pk),cover_name,now_iso())); tid=cur.lastrowid; c.commit(); row=c.execute(TRACK_SELECT+' WHERE t.id=?',(tid,)).fetchone(); c.close()
+        bump()
+        return self.json(201,{'track':track_json(row,'')})
 
     def can_view_track(self,c,tid,u):
-        r=c.execute('SELECT t.*, (SELECT COUNT(*) FROM comments cm WHERE cm.track_id=t.id) AS comment_count FROM tracks t WHERE t.id=?',(tid,)).fetchone()
+        r=c.execute(TRACK_SELECT+' WHERE t.id=?',(tid,)).fetchone()
         if not r: return None
         if r['visibility']=='Private' and (not u or r['user_id']!=u['id']): return None
         return r
@@ -694,49 +723,81 @@ class H(BaseHTTPRequestHandler):
         d=self.parse_json(); text=str(d.get('text','')).strip(); position=float(d.get('position',0) or 0)
         if not text:return self.json(400,{'error':'Comment cannot be empty'})
         with DB_LOCK:
-            c=db(); tr=c.execute('SELECT user_id,title FROM tracks WHERE id=?',(tid,)).fetchone()
-            if not tr: c.close(); return self.json(404,{'error':'Track not found'})
+            c=db(); tr=c.execute('SELECT user_id,title,visibility FROM tracks WHERE id=?',(tid,)).fetchone()
+            if not tr or (tr['visibility']=='Private' and tr['user_id']!=u['id']): c.close(); return self.json(404,{'error':'Track not found'})
             c.execute('INSERT INTO comments(track_id,user_id,text,position,created_at) VALUES(?,?,?,?,?)',(tid,u['id'],text,position,now_iso()))
             if tr['user_id']!=u['id']:
                 c.execute('INSERT INTO notifications(user_id,type,title,body,created_at) VALUES(?,?,?,?,?)',(tr['user_id'],'comment','New comment',f"{u['name']} commented on {tr['title']}",now_iso()))
             c.commit(); c.close()
+        bump()
         return self.json(201,{'ok':True})
 
+    def playlist_vis(self, d, default):
+        v = d.get('visibility')
+        if v is None and 'public' in d:
+            v = 'Public' if d.get('public') else 'Private'
+        v = str(v if v is not None else default).title()
+        return v if v in ('Public','Unlisted','Private') else default
+
     def get_playlists(self):
-        u=get_user_from_handler(self); clause='p.visibility="Public"'; args=[]
+        u=get_user_from_handler(self); uid=u['id'] if u else 0; clause='p.visibility="Public"'; args=[]
         if u: clause='(p.visibility="Public" OR p.visibility="Unlisted" OR p.user_id=?)'; args=[u['id']]
         with DB_LOCK:
-            c=db(); rows=c.execute(f'SELECT p.* FROM playlists p WHERE {clause} ORDER BY p.updated_at DESC LIMIT 200',args).fetchall(); data=[playlist_json(c,r) for r in rows]; c.close()
+            c=db(); rows=c.execute(f'SELECT p.* FROM playlists p WHERE {clause} ORDER BY p.updated_at DESC LIMIT 200',args).fetchall(); data=[playlist_json(c,r,'',uid) for r in rows]; c.close()
         return self.json(200,{'playlists':data})
+
+    def set_playlist_tracks(self, c, pid, u, ids):
+        c.execute('DELETE FROM playlist_tracks WHERE playlist_id=?',(pid,))
+        pos=0
+        for tid in ids:
+            if c.execute('SELECT 1 FROM tracks WHERE id=? AND (user_id=? OR visibility IN ("Public","Unlisted"))',(tid,u['id'])).fetchone():
+                c.execute('INSERT OR IGNORE INTO playlist_tracks(playlist_id,track_id,position) VALUES(?,?,?)',(pid,tid,pos)); pos+=1
 
     def create_playlist(self):
         u=require_user(self)
-        if not u:return
-        d=self.parse_json(); name=str(d.get('name','')).strip() or 'Untitled playlist'; vis=str(d.get('visibility', 'Public')).title();
-        if vis not in ('Public','Unlisted','Private'): vis='Public'
+        if not u: return
+        d=self.parse_json(); name=str(d.get('name','')).strip()[:120] or 'Untitled playlist'; vis=self.playlist_vis(d,'Public')
         ids=[int(x) for x in (d.get('trackIds') or []) if str(x).isdigit()]
         with DB_LOCK:
-            c=db(); now=now_iso(); cur=c.execute('INSERT INTO playlists(user_id,name,artist,description,visibility,cover_url,background_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',(u['id'],name,d.get('artist',''),d.get('description',''),vis,d.get('coverData',''),d.get('backgroundData',''),now,now)); pid=cur.lastrowid
-            for pos,tid in enumerate(ids):
-                if c.execute('SELECT 1 FROM tracks WHERE id=? AND (user_id=? OR visibility IN ("Public","Unlisted"))',(tid,u['id'])).fetchone(): c.execute('INSERT OR IGNORE INTO playlist_tracks(playlist_id,track_id,position) VALUES(?,?,?)',(pid,tid,pos))
-            r=c.execute('SELECT * FROM playlists WHERE id=?',(pid,)).fetchone(); data=playlist_json(c,r); c.commit(); c.close()
+            c=db(); now=now_iso()
+            cur=c.execute('INSERT INTO playlists(user_id,name,artist,description,visibility,cover_url,background_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',(u['id'],name,str(d.get('artist',''))[:120],str(d.get('description',''))[:500],vis,d.get('coverData','') or '',d.get('backgroundData','') or '',now,now)); pid=cur.lastrowid
+            self.set_playlist_tracks(c,pid,u,ids)
+            c.commit(); r=c.execute('SELECT * FROM playlists WHERE id=?',(pid,)).fetchone(); data=playlist_json(c,r,'',u['id']); c.close()
+        bump()
         return self.json(201,{'playlist':data})
 
     def patch_playlist(self,pid):
         u=require_user(self)
-        if not u:return
+        if not u: return
         d=self.parse_json()
         with DB_LOCK:
             c=db(); p=c.execute('SELECT * FROM playlists WHERE id=? AND user_id=?',(pid,u['id'])).fetchone()
-            if not p:c.close();return self.json(404,{'error':'Playlist not found'})
-            vals={k:d.get(k,p[k]) for k in ('name','artist','description','visibility','coverData','backgroundData')}
-            vis=str(vals['visibility']).title(); vis=vis if vis in ('Public','Unlisted','Private') else p['visibility']
-            now=now_iso(); c.execute('UPDATE playlists SET name=?,artist=?,description=?,visibility=?,cover_url=?,background_url=?,updated_at=? WHERE id=?',(vals['name'],vals['artist'],vals['description'],vis,vals['coverData'] or '',vals['backgroundData'] or '',now,pid))
-            c.execute('DELETE FROM playlist_tracks WHERE playlist_id=?',(pid,)); ids=[int(x) for x in (d.get('trackIds') or []) if str(x).isdigit()]
-            for pos,tid in enumerate(ids):
-                if c.execute('SELECT 1 FROM tracks WHERE id=? AND (user_id=? OR visibility IN ("Public","Unlisted"))',(tid,u['id'])).fetchone(): c.execute('INSERT OR IGNORE INTO playlist_tracks(playlist_id,track_id,position) VALUES(?,?,?)',(pid,tid,pos))
-            r=c.execute('SELECT * FROM playlists WHERE id=?',(pid,)).fetchone(); data=playlist_json(c,r); c.commit(); c.close()
+            if not p: c.close(); return self.json(404,{'error':'Playlist not found'})
+            name=str(d.get('name',p['name'])).strip()[:120] or p['name']
+            vis=self.playlist_vis(d,p['visibility'])
+            c.execute('UPDATE playlists SET name=?,artist=?,description=?,visibility=?,cover_url=?,background_url=?,updated_at=? WHERE id=?',(name,str(d.get('artist',p['artist']))[:120],str(d.get('description',p['description']))[:500],vis,(d.get('coverData',p['cover_url']) or ''),(d.get('backgroundData',p['background_url']) or ''),now_iso(),pid))
+            if 'trackIds' in d:
+                self.set_playlist_tracks(c,pid,u,[int(x) for x in (d.get('trackIds') or []) if str(x).isdigit()])
+            c.commit(); r=c.execute('SELECT * FROM playlists WHERE id=?',(pid,)).fetchone(); data=playlist_json(c,r,'',u['id']); c.close()
+        bump()
         return self.json(200,{'playlist':data})
+
+    def delete_playlist(self,pid):
+        u=require_user(self)
+        if not u: return
+        with DB_LOCK:
+            c=db(); p=c.execute('SELECT id FROM playlists WHERE id=? AND user_id=?',(pid,u['id'])).fetchone()
+            if not p: c.close(); return self.json(404,{'error':'Playlist not found'})
+            c.execute('DELETE FROM playlists WHERE id=?',(pid,)); c.commit(); c.close()
+        bump()
+        return self.json(200,{'ok':True})
+
+    def sync_poll(self,q):
+        since=(q.get('since') or [''])[0]
+        try: wait=max(0.0,min(float((q.get('wait') or ['0'])[0]),25.0))
+        except ValueError: wait=0.0
+        rev=sync_wait(since,wait) if wait else sync_token()
+        return self.json(200,{'rev':rev})
 
     def get_messages(self):
         u=require_user(self)
@@ -801,11 +862,14 @@ class H(BaseHTTPRequestHandler):
         u=require_user(self)
         if not u: return
         with DB_LOCK:
-            c=db(); r=c.execute('SELECT filename FROM tracks WHERE id=? AND user_id=?',(tid,u['id'])).fetchone()
+            c=db(); r=c.execute('SELECT filename,cover FROM tracks WHERE id=? AND user_id=?',(tid,u['id'])).fetchone()
             if not r: c.close(); return self.json(404,{'error':'Track not found'})
             c.execute('DELETE FROM tracks WHERE id=?',(tid,)); c.commit(); c.close()
-        try: (UPLOAD_DIR/r['filename']).unlink()
-        except OSError: pass
+        for fn in (r['filename'], r['cover']):
+            if fn:
+                try: (UPLOAD_DIR/fn).unlink()
+                except OSError: pass
+        bump()
         return self.json(200,{'ok':True})
 
 init_db()
