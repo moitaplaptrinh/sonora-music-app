@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, re, json, hmac, hashlib, secrets, sqlite3, mimetypes, urllib.parse
+import os, re, json, hmac, hashlib, secrets, sqlite3, mimetypes, urllib.parse, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import Request as UrlRequest, urlopen
 from pathlib import Path
@@ -50,6 +50,7 @@ def init_db():
           email TEXT NOT NULL UNIQUE,
           password_hash TEXT NOT NULL,
           password_salt TEXT NOT NULL,
+          google_sub TEXT UNIQUE,
           created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS sessions(
@@ -135,9 +136,10 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at);
         ''')
         try:
-            c.execute('ALTER TABLE users ADD COLUMN google_sub TEXT UNIQUE')
+            c.execute('ALTER TABLE users ADD COLUMN google_sub TEXT')
         except sqlite3.OperationalError:
             pass
+        c.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub)')
         c.commit(); c.close()
 
 def scrypt_hash(password, salt=None):
@@ -231,6 +233,26 @@ def create_session(user_id):
         c.close()
     return token
 
+def _google_json_request(req):
+    try:
+        with urlopen(req, timeout=20) as r:
+            raw = r.read().decode('utf-8', 'replace')
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                raise RuntimeError('Google returned a non-JSON response')
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode('utf-8', 'replace')
+        try:
+            data = json.loads(raw)
+            err = data.get('error') or 'http_error'
+            desc = data.get('error_description') or ''
+            raise RuntimeError(f'Google HTTP {e.code}: {err}' + (f' - {desc}' if desc else ''))
+        except json.JSONDecodeError:
+            raise RuntimeError(f'Google HTTP {e.code}')
+    except urllib.error.URLError as e:
+        raise RuntimeError(f'Google network error: {getattr(e, "reason", "connection failed")}')
+
 def google_exchange_code(code):
     body = urllib.parse.urlencode({
         'code': code,
@@ -238,24 +260,30 @@ def google_exchange_code(code):
         'client_secret': GOOGLE_CLIENT_SECRET,
         'redirect_uri': GOOGLE_REDIRECT_URI,
         'grant_type': 'authorization_code',
-    }).encode()
+    }).encode('utf-8')
     req = UrlRequest(
         'https://oauth2.googleapis.com/token',
         data=body,
-        headers={'Content-Type':'application/x-www-form-urlencoded'},
+        headers={
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Accept': 'application/json',
+            'User-Agent': 'SONORA/1.0',
+        },
         method='POST'
     )
-    with urlopen(req, timeout=15) as r:
-        return json.loads(r.read().decode('utf-8'))
+    return _google_json_request(req)
 
 def google_profile(access_token):
     req = UrlRequest(
         'https://openidconnect.googleapis.com/v1/userinfo',
-        headers={'Authorization': f'Bearer {access_token}'},
+        headers={
+            'Authorization': f'Bearer {access_token}',
+            'Accept': 'application/json',
+            'User-Agent': 'SONORA/1.0',
+        },
         method='GET'
     )
-    with urlopen(req, timeout=15) as r:
-        return json.loads(r.read().decode('utf-8'))
+    return _google_json_request(req)
 
 def google_username(c, email, name):
     base = re.sub(r'[^a-z0-9_]+', '_', (email.split('@')[0] or name).lower()).strip('_')
@@ -436,7 +464,8 @@ class H(BaseHTTPRequestHandler):
             'response_type': 'code',
             'scope': 'openid email profile',
             'state': state,
-            'prompt': 'select_account'
+            'prompt': 'select_account',
+            'access_type': 'online'
         }
         location = 'https://accounts.google.com/o/oauth2/v2/auth?' + urllib.parse.urlencode(params)
         self.send_response(302)
@@ -451,22 +480,33 @@ class H(BaseHTTPRequestHandler):
 
         error = (q.get('error') or [''])[0]
         if error:
-            return self.text(400, 'Google sign-in failed: ' + (q.get('error_description') or [error])[0])
+            desc = (q.get('error_description') or [''])[0]
+            return self.text(400, 'Google sign-in failed: ' + (desc or error))
 
         code = (q.get('code') or [''])[0]
         state = (q.get('state') or [''])[0]
         expected = get_cookie_value(self, 'sonora_oauth_state')
         if not code or not state or not expected or not hmac.compare_digest(state, expected):
-            return self.text(400, 'Invalid or expired OAuth state')
+            return self.text(400, 'Invalid or expired OAuth state. Please start Google sign-in again.')
 
         try:
             token_data = google_exchange_code(code)
+            if token_data.get('error'):
+                err = token_data.get('error')
+                desc = token_data.get('error_description') or ''
+                raise RuntimeError(f'Google token error: {err}' + (f' - {desc}' if desc else ''))
+
             access_token = token_data.get('access_token')
             if not access_token:
-                return self.text(400, 'Google did not return an access token')
+                raise RuntimeError('Google did not return an access token')
 
             profile = google_profile(access_token)
-            if profile.get('email_verified') is not True:
+            sub = str(profile.get('sub') or '').strip()
+            email = str(profile.get('email') or '').strip().lower()
+            verified = profile.get('email_verified')
+            if not sub or not email:
+                raise RuntimeError('Google user profile did not include sub/email')
+            if verified not in (True, 'true', '1', 1):
                 return self.text(403, 'Google email address is not verified')
 
             row = google_get_or_create_user(profile)
@@ -474,14 +514,18 @@ class H(BaseHTTPRequestHandler):
 
             self.send_response(302)
             self.send_header('Location', '/')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Pragma', 'no-cache')
             for k, v in self.set_cookie(session).items():
                 self.send_header(k, v)
             for k, v in clear_oauth_state_headers().items():
                 self.send_header(k, v)
             self.end_headers()
         except Exception as e:
-            print('Google OAuth error:', repr(e))
-            return self.text(500, 'Google sign-in could not be completed')
+            # Keep the browser message useful while never exposing client secrets or auth codes.
+            msg = str(e).replace(GOOGLE_CLIENT_SECRET, '[client-secret]') if GOOGLE_CLIENT_SECRET else str(e)
+            print('Google OAuth error:', msg)
+            return self.text(500, 'Google sign-in could not be completed. Details: ' + msg)
 
     def signup(self):
         d=self.parse_json(); name=str(d.get('name','')).strip(); username=str(d.get('username','')).strip().lower(); email=str(d.get('email','')).strip().lower(); password=str(d.get('password',''))
