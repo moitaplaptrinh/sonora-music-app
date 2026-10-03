@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os, re, json, hmac, hashlib, secrets, sqlite3, mimetypes, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.request import Request as UrlRequest, urlopen
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -14,6 +15,17 @@ PORT = int(os.environ.get('PORT', '8787'))
 HOST = os.environ.get('HOST', '0.0.0.0')
 COOKIE_SECURE = os.environ.get('COOKIE_SECURE', '0') == '1'
 MAX_UPLOAD = int(os.environ.get('MAX_UPLOAD_BYTES', str(160 * 1024 * 1024)))
+
+# Google OAuth
+GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '').strip()
+GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET', '').strip()
+PUBLIC_BASE_URL = os.environ.get('PUBLIC_BASE_URL', '').strip().rstrip('/')
+GOOGLE_REDIRECT_URI = os.environ.get(
+    'GOOGLE_REDIRECT_URI',
+    f'{PUBLIC_BASE_URL}/api/auth/google/callback' if PUBLIC_BASE_URL else ''
+).strip()
+OAUTH_STATE_TTL = int(os.environ.get('OAUTH_STATE_TTL_SECONDS', '600'))
+
 
 DB_LOCK = __import__('threading').RLock()
 
@@ -122,6 +134,10 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at);
         ''')
+        try:
+            c.execute('ALTER TABLE users ADD COLUMN google_sub TEXT UNIQUE')
+        except sqlite3.OperationalError:
+            pass
         c.commit(); c.close()
 
 def scrypt_hash(password, salt=None):
@@ -180,6 +196,113 @@ def playlist_json(c, r, base=''):
       'backgroundUrl': r['background_url'], 'trackIds':[x['track_id'] for x in tr], 'createdAt':r['created_at'], 'updatedAt':r['updated_at'],
       'owner': {'id':r['user_id']} if r['user_id'] else None
     }
+
+
+def oauth_configured():
+    return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI)
+
+def get_cookie_value(h, name):
+    for item in h.headers.get('Cookie','').split(';'):
+        item = item.strip()
+        if item.startswith(name + '='):
+            return urllib.parse.unquote(item.split('=',1)[1])
+    return None
+
+def oauth_state_headers(state):
+    secure = '; Secure' if COOKIE_SECURE else ''
+    return {'Set-Cookie': f'sonora_oauth_state={state}; Path=/; HttpOnly; SameSite=Lax; Max-Age={OAUTH_STATE_TTL}{secure}'}
+
+def clear_oauth_state_headers():
+    return {'Set-Cookie': 'sonora_oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'}
+
+def create_session(user_id):
+    token = secrets.token_urlsafe(32)
+    exp = datetime.fromtimestamp(
+        datetime.now(timezone.utc).timestamp() + 30*86400,
+        tz=timezone.utc
+    ).isoformat()
+    with DB_LOCK:
+        c = db()
+        c.execute(
+            'INSERT INTO sessions(user_id,token_hash,created_at,expires_at) VALUES(?,?,?,?)',
+            (user_id, token_hash(token), now_iso(), exp)
+        )
+        c.commit()
+        c.close()
+    return token
+
+def google_exchange_code(code):
+    body = urllib.parse.urlencode({
+        'code': code,
+        'client_id': GOOGLE_CLIENT_ID,
+        'client_secret': GOOGLE_CLIENT_SECRET,
+        'redirect_uri': GOOGLE_REDIRECT_URI,
+        'grant_type': 'authorization_code',
+    }).encode()
+    req = UrlRequest(
+        'https://oauth2.googleapis.com/token',
+        data=body,
+        headers={'Content-Type':'application/x-www-form-urlencoded'},
+        method='POST'
+    )
+    with urlopen(req, timeout=15) as r:
+        return json.loads(r.read().decode('utf-8'))
+
+def google_profile(access_token):
+    req = UrlRequest(
+        'https://openidconnect.googleapis.com/v1/userinfo',
+        headers={'Authorization': f'Bearer {access_token}'},
+        method='GET'
+    )
+    with urlopen(req, timeout=15) as r:
+        return json.loads(r.read().decode('utf-8'))
+
+def google_username(c, email, name):
+    base = re.sub(r'[^a-z0-9_]+', '_', (email.split('@')[0] or name).lower()).strip('_')
+    base = (base or 'google_user')[:20]
+    candidate = base
+    n = 2
+    while c.execute('SELECT 1 FROM users WHERE username=?', (candidate,)).fetchone():
+        suffix = f'_{n}'
+        candidate = base[:20-len(suffix)] + suffix
+        n += 1
+    return candidate
+
+def google_get_or_create_user(profile):
+    sub = str(profile.get('sub','')).strip()
+    email = str(profile.get('email','')).strip().lower()
+    name = str(profile.get('name','')).strip() or email.split('@')[0] or 'Google User'
+    if not sub or not email:
+        raise ValueError('Google identity is incomplete')
+
+    with DB_LOCK:
+        c = db()
+        row = c.execute('SELECT * FROM users WHERE google_sub=?', (sub,)).fetchone()
+        if row:
+            c.close()
+            return row
+
+        # Link Google to an existing account with the same email.
+        row = c.execute('SELECT * FROM users WHERE email=?', (email,)).fetchone()
+        if row:
+            c.execute('UPDATE users SET google_sub=? WHERE id=?', (sub, row['id']))
+            c.commit()
+            row = c.execute('SELECT * FROM users WHERE id=?', (row['id'],)).fetchone()
+            c.close()
+            return row
+
+        username = google_username(c, email, name)
+        random_password = secrets.token_urlsafe(48)
+        digest, salt = scrypt_hash(random_password)
+        cur = c.execute(
+            'INSERT INTO users(name,username,email,password_hash,password_salt,google_sub,created_at) VALUES(?,?,?,?,?,?,?)',
+            (name[:120], username, email, digest, salt, sub, now_iso())
+        )
+        uid = cur.lastrowid
+        c.commit()
+        row = c.execute('SELECT * FROM users WHERE id=?', (uid,)).fetchone()
+        c.close()
+        return row
 
 class H(BaseHTTPRequestHandler):
     server_version = 'SONORA/1.0'
@@ -249,9 +372,11 @@ class H(BaseHTTPRequestHandler):
         p=urllib.parse.urlparse(self.path); path=p.path; q=urllib.parse.parse_qs(p.query)
         if path=='/': return self.serve_file(ROOT/'index.html')
         if path=='/favicon.ico': return self.text(204,'')
-        if path=='/api/health': return self.json(200,{'ok':True,'service':'sonora','time':now_iso()})
+        if path=='/api/health': return self.json(200,{'ok':True,'service':'sonora','time':now_iso(),'googleOAuthConfigured':oauth_configured()})
         if path=='/api/me':
             u=get_user_from_handler(self); return self.json(200,{'user':u})
+        if path=='/api/auth/google' and method=='GET': return self.google_start()
+        if path=='/api/auth/google/callback' and method=='GET': return self.google_callback(q)
         if path=='/api/auth/signup' and method=='POST': return self.signup()
         if path=='/api/auth/login' and method=='POST': return self.login()
         if path=='/api/auth/logout' and method=='POST':
@@ -298,6 +423,66 @@ class H(BaseHTTPRequestHandler):
                 if not b: break
                 self.wfile.write(b)
 
+    def google_start(self):
+        if not oauth_configured():
+            return self.json(503, {
+                'error': 'Google OAuth is not configured',
+                'required': ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REDIRECT_URI']
+            })
+        state = secrets.token_urlsafe(32)
+        params = {
+            'client_id': GOOGLE_CLIENT_ID,
+            'redirect_uri': GOOGLE_REDIRECT_URI,
+            'response_type': 'code',
+            'scope': 'openid email profile',
+            'state': state,
+            'prompt': 'select_account'
+        }
+        location = 'https://accounts.google.com/o/oauth2/v2/auth?' + urllib.parse.urlencode(params)
+        self.send_response(302)
+        self.send_header('Location', location)
+        for k, v in oauth_state_headers(state).items():
+            self.send_header(k, v)
+        self.end_headers()
+
+    def google_callback(self, q):
+        if not oauth_configured():
+            return self.text(503, 'Google OAuth is not configured')
+
+        error = (q.get('error') or [''])[0]
+        if error:
+            return self.text(400, 'Google sign-in failed: ' + (q.get('error_description') or [error])[0])
+
+        code = (q.get('code') or [''])[0]
+        state = (q.get('state') or [''])[0]
+        expected = get_cookie_value(self, 'sonora_oauth_state')
+        if not code or not state or not expected or not hmac.compare_digest(state, expected):
+            return self.text(400, 'Invalid or expired OAuth state')
+
+        try:
+            token_data = google_exchange_code(code)
+            access_token = token_data.get('access_token')
+            if not access_token:
+                return self.text(400, 'Google did not return an access token')
+
+            profile = google_profile(access_token)
+            if profile.get('email_verified') is not True:
+                return self.text(403, 'Google email address is not verified')
+
+            row = google_get_or_create_user(profile)
+            session = create_session(row['id'])
+
+            self.send_response(302)
+            self.send_header('Location', '/')
+            for k, v in self.set_cookie(session).items():
+                self.send_header(k, v)
+            for k, v in clear_oauth_state_headers().items():
+                self.send_header(k, v)
+            self.end_headers()
+        except Exception as e:
+            print('Google OAuth error:', repr(e))
+            return self.text(500, 'Google sign-in could not be completed')
+
     def signup(self):
         d=self.parse_json(); name=str(d.get('name','')).strip(); username=str(d.get('username','')).strip().lower(); email=str(d.get('email','')).strip().lower(); password=str(d.get('password',''))
         if len(name)<2 or not re.match(r'^[a-z0-9_]{3,20}$',username) or not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$',email) or len(password)<8: return self.json(400,{'error':'Invalid account fields'})
@@ -307,16 +492,14 @@ class H(BaseHTTPRequestHandler):
                 c=db(); cur=c.execute('INSERT INTO users(name,username,email,password_hash,password_salt,created_at) VALUES(?,?,?,?,?,?)',(name,username,email,digest,salt,now_iso())); uid=cur.lastrowid; c.commit(); row=c.execute('SELECT * FROM users WHERE id=?',(uid,)).fetchone(); c.close()
         except sqlite3.IntegrityError:
             return self.json(409,{'error':'Username or email already exists'})
-        token=secrets.token_urlsafe(32); exp=datetime.fromtimestamp(datetime.now(timezone.utc).timestamp()+30*86400,tz=timezone.utc).isoformat()
-        with DB_LOCK: c=db(); c.execute('INSERT INTO sessions(user_id,token_hash,created_at,expires_at) VALUES(?,?,?,?)',(uid,token_hash(token),now_iso(),exp)); c.commit(); c.close()
+        token=create_session(uid)
         return self.json(201,{'user':public_user(row)},self.set_cookie(token))
 
     def login(self):
         d=self.parse_json(); email=str(d.get('email','')).strip().lower(); password=str(d.get('password',''))
         with DB_LOCK: c=db(); row=c.execute('SELECT * FROM users WHERE email=?',(email,)).fetchone(); c.close()
         if not row or not check_password(password,row['password_hash'],row['password_salt']): return self.json(401,{'error':'Invalid email or password'})
-        token=secrets.token_urlsafe(32); exp=datetime.fromtimestamp(datetime.now(timezone.utc).timestamp()+30*86400,tz=timezone.utc).isoformat()
-        with DB_LOCK: c=db(); c.execute('INSERT INTO sessions(user_id,token_hash,created_at,expires_at) VALUES(?,?,?,?)',(row['id'],token_hash(token),now_iso(),exp)); c.commit(); c.close()
+        token=create_session(row['id'])
         return self.json(200,{'user':public_user(row)},self.set_cookie(token))
 
     def visible_track_clause(self,u):
