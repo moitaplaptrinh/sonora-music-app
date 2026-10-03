@@ -160,12 +160,44 @@ body.theme-retro .glass,body.theme-retro .card,body.theme-retro .row,body.theme-
 <script>
 const $=s=>document.querySelector(s),E=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const LS=k=>{try{return JSON.parse(localStorage.getItem('sn_'+k))}catch(e){return null}},SV=(k,v)=>{try{localStorage.setItem('sn_'+k,JSON.stringify(v))}catch(e){}};
-const API={online:false,user:null};
+const API={online:false,user:null,authReady:false};
 const apiFetch=async(path,opt={})=>{const r=await fetch(path,{credentials:'include',...opt});let data=null;try{data=await r.json()}catch(_){data=null}if(!r.ok)throw new Error(data?.error||('HTTP '+r.status));return data};
 const apiJson=(path,body)=>apiFetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
 const backendReady=()=>API.online&&!!API.user;
+const cacheAuth=u=>{try{localStorage.setItem(AK,JSON.stringify({user:u,at:Date.now(),server:true}))}catch(e){}};
 let communityTracks=[],communityComments={},communityPlaylists=[];
-async function bootAPI(){try{await apiFetch('/api/health');API.online=true;try{API.user=(await apiFetch('/api/me')).user||null}catch(_){API.user=null};if(API.user&&!axSes())axIn(API.user,1);await refreshCommunity()}catch(_){API.online=false}}
+async function bootAPI(){
+  try{
+    await apiFetch('/api/health');
+    API.online=true;
+    const me=await apiFetch('/api/me');
+    const serverUser=me.user||null;
+    const cached=axSes();
+    API.user=serverUser;
+
+    // The server session is the source of truth. Never let an old local/demo
+    // account override the account represented by this browser's cookie.
+    if(serverUser){
+      if(!cached || String(cached.id)!==String(serverUser.id) || String(cached.email||'').toLowerCase()!==String(serverUser.email||'').toLowerCase()){
+        cacheAuth(serverUser);
+      }
+      $('#authScreen')?.classList.remove('open');
+      document.body.classList.remove('noauth');
+      render();
+    }else if(cached){
+      try{localStorage.removeItem(AK)}catch(e){}
+      document.body.classList.add('noauth');
+      $('#authScreen')?.classList.add('open');
+      axS.r='login';
+      axR();
+    }
+    API.authReady=true;
+    await refreshCommunity();
+  }catch(_){
+    API.online=false;
+    API.authReady=false;
+  }
+}
 async function refreshCommunity(){if(!API.online)return;try{const r=await apiFetch('/api/recommendations?limit=12');communityTracks=r.tracks||[]}catch(_){}try{const r=await apiFetch('/api/tracks?limit=200&sort=popular');communityTracks=(r.tracks||communityTracks)}catch(_){}try{const r=await apiFetch('/api/playlists');communityPlaylists=r.playlists||[]}catch(_){} /* render is triggered after remote library hydration */}
 async function markServerPlay(t){if(!backendReady()||!t?.serverId)return;try{await apiJson('/api/tracks/'+t.serverId+'/play',{})}catch(_){}refreshCommunity()}
 function serverTrackToLocal(s){return{id:'s'+s.id,serverId:s.id,title:s.title,artist:s.artist||'Unknown artist',album:s.album||'',genre:s.genre||'',tags:s.tags||'',vis:s.visibility||'Public',explicit:!!s.explicit,url:s.streamUrl||('/api/tracks/'+s.id+'/stream'),dur:+s.duration||0,peaks:s.peaks||[],cover:s.coverUrl||'',up:1,seed:(+s.id%8)+1,playCount:+s.playCount||0,commentCount:+s.commentCount||0,createdAt:s.createdAt}}
@@ -455,12 +487,16 @@ else if(r==='signup')c.innerHTML=L+`<h1 class="auth-title">Create your account.<
 else if(r==='forgot')c.innerHTML=L+`<h1 class="auth-title">Reset your password.</h1><p class="auth-sub">We'll send a reset link to your email.</p><form id="authForm" novalidate>${F('fgEmail','Email','email','you@sonora.app')}<button class="auth-btn" id="authSubmit" type="submit">Send Reset Link</button></form><div class="auth-foot">${G('login','← Back to sign in')}</div>`;
 else{const A=[...new Set(T.map(t=>t.artist))],ON=[['What do you listen to?','Pick a few genres to personalize your feed.','genres',['Electronic','Ambient','Cinematic','Downtempo','Techno','House','Lo-fi','Hip-hop']],['Who are you into?','Follow artists to shape your recommendations.','artists',A],['What\'s your vibe?','Choose the moods you want to hear.','moods',['Night','Calm','Driving','Focus','Energetic','Melancholy']]],st=axS.st,o=ON[st];
 c.innerHTML=L+`<p class="auth-sub" style="margin-bottom:14px;font-size:11px;letter-spacing:.1em;text-transform:uppercase">Step ${st+1} of 4</p>`+(o?`<h2 style="font:700 22px Manrope,Inter;letter-spacing:-.02em;margin:0 0 6px;text-align:center">${o[0]}</h2><p class="auth-sub" style="margin-bottom:0">${o[1]}</p><div class="onb-tiles">${o[3].map(g=>`<button class="onb-tile${axS.sel[o[2]].includes(g)?' on':''}" data-a="onb-pick" data-k="${o[2]}" data-v="${E(g)}">${E(g)}</button>`).join('')}</div>`:`<h2 style="font:700 22px Manrope,Inter;letter-spacing:-.02em;margin:0 0 6px;text-align:center">You're ready.</h2><p class="auth-sub">SONORA is personalizing your experience.</p><div style="text-align:center;font-size:60px;margin:30px 0">◈</div>`)+`<div style="display:flex;gap:8px;margin-top:8px">${st>0?'<button class="btn g" data-a="onb-back" style="flex:1">Back</button>':''}<button class="auth-btn" data-a="onb-next" style="flex:${st>0?2:1};margin-top:0">${st===3?'Enter SONORA':'Continue'}</button></div>`}}
-function axIn(u,back){try{localStorage.setItem(AK,JSON.stringify({user:u,at:Date.now()}))}catch(e){}$('#authScreen').classList.remove('open');document.body.classList.remove('noauth');if(!cs.name){cs.name=String(u.name||u.username||'').slice(0,24);saveCS();applyCS()}render();toast((back?'Welcome back, ':'Welcome to SONORA, ')+(u.name||u.username))}
+function axIn(u,back){
+  cacheAuth(u);
+  API.user=u;
+  $('#authScreen').classList.remove('open');
+  document.body.classList.remove('noauth');
+  if(!cs.name){cs.name=String(u.name||u.username||'').slice(0,24);saveCS();applyCS()}
+  render();
+  toast((back?'Welcome back, ':'Welcome to SONORA, ')+(u.name||u.username));
+}
 function axOut(){au.pause();if(API.online)fetch('/api/auth/logout',{method:'POST',credentials:'include'}).catch(()=>{});API.user=null;try{localStorage.removeItem(AK)}catch(e){}closeMenu();closeQV();fpset(0);document.body.classList.add('noauth');axS.r='login';axR();$('#authScreen').classList.add('open')}
-document.addEventListener('submit',e=>{if(!e.target.closest('#authForm'))return;e.preventDefault();const r=axS.r,b=$('#authSubmit'),V=id=>$('#'+id).value;let ok=true;const ck=(id,bad,m)=>{axErr(id,bad?m:'');if(bad)ok=false},go=(t,f)=>{b.classList.add('loading');b.disabled=true;setTimeout(()=>{b.classList.remove('loading');b.disabled=false;f()},t)};
-if(r==='login'){const em=V('authEmail').trim(),pw=V('authPw');ck('authEmail',!okMail(em),'Please enter a valid email');ck('authPw',pw.length<8,'Min. 8 characters');if(ok)go(700,()=>axIn({id:uid(),email:em,username:em.split('@')[0],name:em.split('@')[0].replace(/[^a-z]/gi,' ').replace(/\b\w/g,c=>c.toUpperCase()).trim()||'Listener'},1))}
-else if(r==='signup'){const n=V('suName').trim(),u=V('suUser').trim().toLowerCase(),em=V('suEmail').trim(),pw=V('suPw');ck('suName',n.length<2,'Name too short');ck('suUser',!/^[a-z0-9_]{3,20}$/.test(u),'3-20 chars: a-z, 0-9, _');ck('suEmail',!okMail(em),'Invalid email');ck('suPw',pw.length<8,'Min. 8 characters');ck('suPw2',pw!==V('suPw2'),'Passwords do not match');if(ok)go(800,()=>{axS.pu={id:uid(),email:em,username:u,name:n};axS.r='onb';axS.st=0;axS.sel={genres:[],artists:[],moods:[]};axR()})}
-else if(r==='forgot'){const em=V('fgEmail').trim();ck('fgEmail',!okMail(em),'Invalid email');if(ok)go(700,()=>{toast('Reset link sent (demo)');setTimeout(()=>{axS.r='login';axR()},900)})}});
 const axFin=()=>{const u=axS.pu||{id:uid(),name:'Listener',username:'listener',email:'listener@sonora.app'};axS.pu=null;if(axS.sel.artists.length){fol=[...new Set([...fol,...axS.sel.artists])];SV('fol',fol)}axIn(u,0)};
 document.addEventListener('click',e=>{const a=e.target.closest('[data-a]'),d=a&&a.dataset;if(a&&/^(auth|onb)-/.test(d.a)){const k=d.a;if(k==='auth-goto'){axS.r=d.v;axR()}else if(k==='auth-social'){if(d.v==='Google'){window.location.href=new URL('/api/auth/google',window.location.origin).href}else if(d.v==='Apple'){toast('Apple Sign In chưa được cấu hình OAuth trên server')} }else if(k==='onb-pick'){const x=axS.sel[d.k];axS.sel[d.k]=x.includes(d.v)?x.filter(v=>v!==d.v):[...x,d.v];axR()}else if(k==='onb-next'){if(axS.st<3){axS.st++;axR()}else axFin()}else if(k==='onb-back'&&axS.st>0){axS.st--;axR()}return}
 if(e.target.closest('#authBack')){if(axS.r==='onb'&&axS.st>0)axS.st--;else axS.r='login';axR()}else if(e.target.closest('#authSkip'))axFin()});
@@ -468,7 +504,31 @@ document.addEventListener('keydown',e=>{if(document.body.classList.contains('noa
 if(axSes())document.body.classList.remove('noauth');else{$('#authScreen').classList.add('open');axR()}
 
 /* ---- real backend auth bridge: capture phase keeps existing auth UI/flow intact ---- */
-document.addEventListener('submit',async e=>{if(!API.online||!e.target.closest('#authForm'))return;e.preventDefault();e.stopImmediatePropagation();const r=axS.r,b=$('#authSubmit'),V=id=>$('#'+id)?.value||'',setBusy=x=>{b.disabled=x;b.classList.toggle('loading',x)};try{setBusy(true);if(r==='login'){const data=await apiJson('/api/auth/login',{email:V('authEmail').trim(),password:V('authPw')});API.user=data.user;axIn(API.user,1);toast('Signed in to SONORA Cloud')}else if(r==='signup'){const data=await apiJson('/api/auth/signup',{name:V('suName').trim(),username:V('suUser').trim().toLowerCase(),email:V('suEmail').trim(),password:V('suPw'),genres:axS.sel.genres,artists:axS.sel.artists,moods:axS.sel.moods});API.user=data.user;axIn(API.user,0);toast('Account created')}else if(r==='forgot'){toast('Password reset requires your mail provider / production email service')} }catch(err){toast(err.message||'Authentication failed')}finally{setBusy(false)}},true);
+document.addEventListener('submit',async e=>{
+  const form=e.target.closest('#authForm');
+  if(!form)return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if(!API.authReady||!API.online){toast('SONORA server is not ready. Please try again.');return}
+  const r=axS.r,b=$('#authSubmit'),V=id=>$('#'+id)?.value||'',setBusy=x=>{if(b){b.disabled=x;b.classList.toggle('loading',x)}};
+  try{
+    setBusy(true);
+    if(r==='login'){
+      const data=await apiJson('/api/auth/login',{email:V('authEmail').trim(),password:V('authPw')});
+      API.user=data.user;
+      axIn(API.user,1);
+      toast('Signed in to SONORA Cloud');
+    }else if(r==='signup'){
+      const data=await apiJson('/api/auth/signup',{name:V('suName').trim(),username:V('suUser').trim().toLowerCase(),email:V('suEmail').trim(),password:V('suPw'),genres:axS.sel.genres,artists:axS.sel.artists,moods:axS.sel.moods});
+      API.user=data.user;
+      axIn(API.user,0);
+      toast('Account created');
+    }else if(r==='forgot'){
+      toast('Password reset requires your mail provider / production email service');
+    }
+  }catch(err){toast(err.message||'Authentication failed')}
+  finally{setBusy(false)}
+},true);
 /* ---- background + extra customization ---- */
 const BGP=[['Mist','#ECECE6','#C8C8C2',140],['Silver','#DDDDD8','#9E9E98',160],['Pearl','#FAFAF6','#D8D8D2',120],['Graphite','#2A2A28','#0A0A0A',135],['Obsidian','#141414','#000000',160],['Warm','#F0EBE0','#C8BEB0',140],['Cool','#E8E8E4','#B8BCC0',140]],
 PRE=[['Default',{bgt:'default',ac:''},'system'],['Midnight',{bgt:'gradient',c1:'#141a2e',c2:'#050505',ang:160,ac:'#3b82f6'},'dark'],['Sunset',{bgt:'gradient',c1:'#f6d5b8',c2:'#e8a0a0',ang:140,ac:'#ff8a00'},'light'],['Neon',{bgt:'gradient',c1:'#1a0b2e',c2:'#000000',ang:150,ac:'#ec4899'},'dark'],['Forest',{bgt:'gradient',c1:'#16301f',c2:'#050a07',ang:155,ac:'#22c55e'},'dark']],
