@@ -392,8 +392,12 @@ class H(BaseHTTPRequestHandler):
         return out,files
     def set_cookie(self, token, max_age=2592000):
         secure='; Secure' if COOKIE_SECURE else ''
-        return {'Set-Cookie':f'sonora_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}'}
-    def clear_cookie(self): return {'Set-Cookie':'sonora_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'}
+        # One browser gets one cookie value; the server keeps every active session
+        # as a separate row, so another browser/account is never logged out here.
+        value=f'sonora_session={urllib.parse.quote(token, safe="")}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}'
+        return {'Set-Cookie':value}
+    def clear_cookie(self):
+        return {'Set-Cookie':'sonora_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'}
 
     def do_GET(self):
         try: self.route('GET')
@@ -413,7 +417,15 @@ class H(BaseHTTPRequestHandler):
         try: self.route('DELETE')
         except Exception as e: print('DELETE error',repr(e)); self.json(500,{'error':'Internal server error'})
     def do_OPTIONS(self):
-        self.send_response(204); self.send_header('Access-Control-Allow-Origin',self.headers.get('Origin','*')); self.send_header('Access-Control-Allow-Credentials','true'); self.send_header('Access-Control-Allow-Headers','Content-Type'); self.send_header('Access-Control-Allow-Methods','GET,POST,PATCH,DELETE,OPTIONS'); self.end_headers()
+        origin=self.headers.get('Origin')
+        self.send_response(204)
+        if origin:
+            self.send_header('Access-Control-Allow-Origin',origin)
+            self.send_header('Vary','Origin')
+        self.send_header('Access-Control-Allow-Credentials','true')
+        self.send_header('Access-Control-Allow-Headers','Content-Type')
+        self.send_header('Access-Control-Allow-Methods','GET,POST,PATCH,DELETE,OPTIONS')
+        self.end_headers()
     def route(self,method):
         p=urllib.parse.urlparse(self.path); path=p.path; q=urllib.parse.parse_qs(p.query)
         if path=='/': return self.serve_file(ROOT/'index.html')
@@ -566,8 +578,14 @@ class H(BaseHTTPRequestHandler):
     def login(self):
         if not rate_ok('login:'+self.client_address[0]): return self.json(429,{'error':'Too many attempts. Wait a minute and try again.'})
         d=self.parse_json(); email=str(d.get('email','')).strip().lower(); password=str(d.get('password',''))
-        with DB_LOCK: c=db(); row=c.execute('SELECT * FROM users WHERE email=?',(email,)).fetchone(); c.close()
-        if not row or not check_password(password,row['password_hash'],row['password_salt']): return self.json(401,{'error':'Invalid email or password'})
+        with DB_LOCK:
+            c=db()
+            row=c.execute('SELECT * FROM users WHERE email=?',(email,)).fetchone()
+            c.close()
+        if not row or not check_password(password,row['password_hash'],row['password_salt']):
+            return self.json(401,{'error':'Invalid email or password'})
+        # IMPORTANT: do not delete/replace another session. Each login creates its
+        # own token, allowing Edge and Chrome to stay signed into different users.
         token=create_session(row['id'])
         return self.json(200,{'user':public_user(row)},self.set_cookie(token))
 
