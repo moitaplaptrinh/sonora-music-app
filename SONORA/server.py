@@ -192,11 +192,16 @@ def safe_name(name):
     return stem[:140]
 
 def track_json(r, base=''):
+    owner_id = r['user_id'] if 'user_id' in r.keys() else None
+    owner = None
+    if owner_id is not None and 'owner_name' in r.keys():
+        owner = {'id': owner_id, 'name': r['owner_name'], 'username': r['owner_username']}
     return {
-      'id': r['id'], 'serverId': r['id'], 'ownerId': r['user_id'], 'title': r['title'], 'artist': r['artist'], 'album': r['album'],
+      'id': r['id'], 'serverId': r['id'], 'title': r['title'], 'artist': r['artist'], 'album': r['album'],
       'genre': r['genre'], 'tags': r['tags'], 'visibility': r['visibility'], 'explicit': bool(r['explicit']),
       'duration': r['duration'], 'playCount': r['play_count'], 'commentCount': r['comment_count'] if 'comment_count' in r.keys() else 0,
-      'createdAt': r['created_at'], 'streamUrl': f'{base}/api/tracks/{r["id"]}/stream', 'coverUrl': '', 'peaks': []
+      'createdAt': r['created_at'], 'streamUrl': f'{base}/api/tracks/{r["id"]}/stream', 'coverUrl': '', 'peaks': [],
+      'owner': owner
     }
 
 def playlist_json(c, r, base=''):
@@ -392,12 +397,8 @@ class H(BaseHTTPRequestHandler):
         return out,files
     def set_cookie(self, token, max_age=2592000):
         secure='; Secure' if COOKIE_SECURE else ''
-        # One browser gets one cookie value; the server keeps every active session
-        # as a separate row, so another browser/account is never logged out here.
-        value=f'sonora_session={urllib.parse.quote(token, safe="")}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}'
-        return {'Set-Cookie':value}
-    def clear_cookie(self):
-        return {'Set-Cookie':'sonora_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'}
+        return {'Set-Cookie':f'sonora_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}'}
+    def clear_cookie(self): return {'Set-Cookie':'sonora_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'}
 
     def do_GET(self):
         try: self.route('GET')
@@ -417,15 +418,7 @@ class H(BaseHTTPRequestHandler):
         try: self.route('DELETE')
         except Exception as e: print('DELETE error',repr(e)); self.json(500,{'error':'Internal server error'})
     def do_OPTIONS(self):
-        origin=self.headers.get('Origin')
-        self.send_response(204)
-        if origin:
-            self.send_header('Access-Control-Allow-Origin',origin)
-            self.send_header('Vary','Origin')
-        self.send_header('Access-Control-Allow-Credentials','true')
-        self.send_header('Access-Control-Allow-Headers','Content-Type')
-        self.send_header('Access-Control-Allow-Methods','GET,POST,PATCH,DELETE,OPTIONS')
-        self.end_headers()
+        self.send_response(204); self.send_header('Access-Control-Allow-Origin',self.headers.get('Origin','*')); self.send_header('Access-Control-Allow-Credentials','true'); self.send_header('Access-Control-Allow-Headers','Content-Type'); self.send_header('Access-Control-Allow-Methods','GET,POST,PATCH,DELETE,OPTIONS'); self.end_headers()
     def route(self,method):
         p=urllib.parse.urlparse(self.path); path=p.path; q=urllib.parse.parse_qs(p.query)
         if path=='/': return self.serve_file(ROOT/'index.html')
@@ -450,6 +443,7 @@ class H(BaseHTTPRequestHandler):
             if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$',email): return self.json(400,{'ok':False,'error':'Invalid email'})
             return self.json(200,{'ok':True,'message':'Reset email service is not configured in this starter build.'})
         if path=='/api/recommendations' and method=='GET': return self.tracks()
+        if path=='/api/community/tracks' and method=='GET': return self.community_tracks()
         if path=='/api/tracks' and method=='GET': return self.tracks()
         if path=='/api/tracks' and method=='POST': return self.upload_track()
         m=re.match(r'^/api/tracks/(\d+)/stream$',path)
@@ -578,14 +572,8 @@ class H(BaseHTTPRequestHandler):
     def login(self):
         if not rate_ok('login:'+self.client_address[0]): return self.json(429,{'error':'Too many attempts. Wait a minute and try again.'})
         d=self.parse_json(); email=str(d.get('email','')).strip().lower(); password=str(d.get('password',''))
-        with DB_LOCK:
-            c=db()
-            row=c.execute('SELECT * FROM users WHERE email=?',(email,)).fetchone()
-            c.close()
-        if not row or not check_password(password,row['password_hash'],row['password_salt']):
-            return self.json(401,{'error':'Invalid email or password'})
-        # IMPORTANT: do not delete/replace another session. Each login creates its
-        # own token, allowing Edge and Chrome to stay signed into different users.
+        with DB_LOCK: c=db(); row=c.execute('SELECT * FROM users WHERE email=?',(email,)).fetchone(); c.close()
+        if not row or not check_password(password,row['password_hash'],row['password_salt']): return self.json(401,{'error':'Invalid email or password'})
         token=create_session(row['id'])
         return self.json(200,{'user':public_user(row)},self.set_cookie(token))
 
@@ -594,12 +582,47 @@ class H(BaseHTTPRequestHandler):
         return '(t.visibility="Public")', []
 
     def tracks(self):
-        u=get_user_from_handler(self); qs=urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query); limit=max(1,min(int(qs.get('limit',['50'])[0]),200)); sort=qs.get('sort',['popular'])[0]
+        u=get_user_from_handler(self)
+        qs=urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        limit=max(1,min(int(qs.get('limit',['50'])[0]),200))
+        sort=qs.get('sort',['popular'])[0]
         clause,args=self.visible_track_clause(u)
         order='t.play_count DESC, t.created_at DESC' if sort=='popular' else 't.created_at DESC'
         with DB_LOCK:
-            c=db(); rows=c.execute(f'''SELECT t.*, (SELECT COUNT(*) FROM comments cm WHERE cm.track_id=t.id) AS comment_count FROM tracks t WHERE {clause} ORDER BY {order} LIMIT ?''',args+[limit]).fetchall(); c.close()
-        base=''; return self.json(200,{'tracks':[track_json(r,base) for r in rows]})
+            c=db()
+            rows=c.execute(f'''
+                SELECT t.*,
+                       (SELECT COUNT(*) FROM comments cm WHERE cm.track_id=t.id) AS comment_count,
+                       u.name AS owner_name, u.username AS owner_username
+                FROM tracks t
+                JOIN users u ON u.id=t.user_id
+                WHERE {clause}
+                ORDER BY {order}
+                LIMIT ?
+            ''',args+[limit]).fetchall()
+            c.close()
+        return self.json(200,{'tracks':[track_json(r,'') for r in rows]})
+
+    def community_tracks(self):
+        # Public community feed: deliberately independent of the current session.
+        qs=urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        limit=max(1,min(int(qs.get('limit',['100'])[0]),200))
+        sort=qs.get('sort',['newest'])[0]
+        order='t.play_count DESC, t.created_at DESC' if sort=='popular' else 't.created_at DESC'
+        with DB_LOCK:
+            c=db()
+            rows=c.execute(f'''
+                SELECT t.*,
+                       (SELECT COUNT(*) FROM comments cm WHERE cm.track_id=t.id) AS comment_count,
+                       u.name AS owner_name, u.username AS owner_username
+                FROM tracks t
+                JOIN users u ON u.id=t.user_id
+                WHERE t.visibility='Public'
+                ORDER BY {order}
+                LIMIT ?
+            ''',(limit,)).fetchall()
+            c.close()
+        return self.json(200,{'tracks':[track_json(r,'') for r in rows]})
 
     def upload_track(self):
         u=require_user(self)
@@ -612,7 +635,13 @@ class H(BaseHTTPRequestHandler):
         if vis not in ('Public','Unlisted','Private'): vis='Public'
         safe=safe_name(f['filename']); unique=f'{secrets.token_hex(8)}_{safe}'; path=UPLOAD_DIR/unique; path.write_bytes(f['data'])
         with DB_LOCK:
-            c=db(); cur=c.execute('INSERT INTO tracks(user_id,title,artist,album,genre,tags,visibility,explicit,filename,mime,size_bytes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(u['id'],title,artist,album,genre,tags,vis,explicit,unique,f['content_type'],len(f['data']),now_iso())); tid=cur.lastrowid; c.commit(); row=c.execute('SELECT t.*,0 comment_count FROM tracks t WHERE t.id=?',(tid,)).fetchone(); c.close()
+            c=db()
+            cur=c.execute('INSERT INTO tracks(user_id,title,artist,album,genre,tags,visibility,explicit,filename,mime,size_bytes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(u['id'],title,artist,album,genre,tags,vis,explicit,unique,f['content_type'],len(f['data']),now_iso()))
+            tid=cur.lastrowid
+            c.commit()
+            row=c.execute('''SELECT t.*, 0 AS comment_count, u.name AS owner_name, u.username AS owner_username
+                             FROM tracks t JOIN users u ON u.id=t.user_id WHERE t.id=?''',(tid,)).fetchone()
+            c.close()
         out=track_json(row,''); out['streamUrl']=f'/api/tracks/{tid}/stream'; return self.json(201,{'track':out})
 
     def can_view_track(self,c,tid,u):
