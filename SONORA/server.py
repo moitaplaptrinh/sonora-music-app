@@ -63,6 +63,7 @@ def now_iso():
 def db():
     c = sqlite3.connect(DB_PATH, check_same_thread=False)
     c.row_factory = sqlite3.Row
+    c.execute('PRAGMA busy_timeout=5000')
     c.execute('PRAGMA journal_mode=WAL')
     c.execute('PRAGMA foreign_keys=ON')
     return c
@@ -316,7 +317,7 @@ def clear_oauth_state_headers():
 def create_session(user_id):
     token = secrets.token_urlsafe(32)
     exp = datetime.fromtimestamp(
-        datetime.now(timezone.utc).timestamp() + 30*86400,
+        datetime.now(timezone.utc).timestamp() + 365*86400,
         tz=timezone.utc
     ).isoformat()
     with DB_LOCK:
@@ -406,14 +407,12 @@ def google_get_or_create_user(profile):
             c.close()
             return row
 
-        # Link Google to an existing account with the same email.
-        row = c.execute('SELECT * FROM users WHERE email=?', (email,)).fetchone()
-        if row:
-            c.execute('UPDATE users SET google_sub=? WHERE id=?', (sub, row['id']))
-            c.commit()
-            row = c.execute('SELECT * FROM users WHERE id=?', (row['id'],)).fetchone()
+        # Never merge a Google account into an existing password account.
+        # The same email may only belong to one account, so sign-in is rejected.
+        existing_email = c.execute('SELECT id FROM users WHERE email=?', (email,)).fetchone()
+        if existing_email:
             c.close()
-            return row
+            raise ValueError('An account already exists with this email. Sign in with email/password instead.')
 
         username = google_username(c, email, name)
         random_password = secrets.token_urlsafe(48)
@@ -507,7 +506,7 @@ class H(BaseHTTPRequestHandler):
             else:
                 out[name]=data.decode('utf-8','ignore')
         return out,files
-    def set_cookie(self, token, max_age=2592000):
+    def set_cookie(self, token, max_age=31536000):
         secure='; Secure' if COOKIE_SECURE else ''
         # One browser gets one cookie value; the server keeps every active session
         # as a separate row, so another browser/account is never logged out here.
@@ -1068,8 +1067,19 @@ class H(BaseHTTPRequestHandler):
         return self.json(200,{'ok':True})
 
 init_db()
-print(f'SONORA server listening on http://127.0.0.1:{PORT} (data: {DATA_DIR})')
-print(f'Open SONORA at: http://localhost:{PORT}/   (page: {find_index().name})')
 ThreadingHTTPServer.allow_reuse_address=True
-httpd=ThreadingHTTPServer((HOST,PORT),H)
+try:
+    httpd=ThreadingHTTPServer((HOST,PORT),H)
+except OSError as exc:
+    if getattr(exc, 'errno', None) == 98:
+        fallback=int(os.environ.get('SONORA_FALLBACK_PORT','8787'))
+        if fallback == PORT:
+            fallback += 1
+        print(f'Port {PORT} is busy; using fallback port {fallback}', flush=True)
+        PORT=fallback
+        httpd=ThreadingHTTPServer((HOST,PORT),H)
+    else:
+        raise
+print(f'SONORA server listening on http://127.0.0.1:{PORT} (data: {DATA_DIR})', flush=True)
+print(f'Open SONORA at: http://localhost:{PORT}/   (page: {find_index().name})', flush=True)
 httpd.serve_forever()
