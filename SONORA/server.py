@@ -234,7 +234,12 @@ def get_user_from_handler(h):
     for item in cookie.split(';'):
         item=item.strip()
         if item.startswith('sonora_session='):
-            token = item.split('=',1)[1]
+            token = urllib.parse.unquote(item.split('=',1)[1])
+            break
+    if not token:
+        auth = h.headers.get('Authorization','')
+        if auth.lower().startswith('bearer '):
+            token = auth[7:].strip()
     if not token:
         return None
     with DB_LOCK:
@@ -705,7 +710,7 @@ class H(BaseHTTPRequestHandler):
         except sqlite3.IntegrityError:
             return self.json(409,{'error':'Username or email already exists'})
         token=create_session(uid)
-        return self.json(201,{'user':public_user(row)},self.set_cookie(token))
+        return self.json(201,{'user':public_user(row),'sessionToken':token},self.set_cookie(token))
 
     def login(self):
         if not rate_ok('login:'+self.client_address[0]): return self.json(429,{'error':'Too many attempts. Wait a minute and try again.'})
@@ -719,7 +724,7 @@ class H(BaseHTTPRequestHandler):
         # IMPORTANT: do not delete/replace another session. Each login creates its
         # own token, allowing Edge and Chrome to stay signed into different users.
         token=create_session(row['id'])
-        return self.json(200,{'user':public_user(row)},self.set_cookie(token))
+        return self.json(200,{'user':public_user(row),'sessionToken':token},self.set_cookie(token))
 
     def patch_profile(self):
         u=require_user(self)
