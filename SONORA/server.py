@@ -193,7 +193,7 @@ def safe_name(name):
 
 def track_json(r, base=''):
     return {
-      'id': r['id'], 'serverId': r['id'], 'title': r['title'], 'artist': r['artist'], 'album': r['album'],
+      'id': r['id'], 'serverId': r['id'], 'ownerId': r['user_id'], 'title': r['title'], 'artist': r['artist'], 'album': r['album'],
       'genre': r['genre'], 'tags': r['tags'], 'visibility': r['visibility'], 'explicit': bool(r['explicit']),
       'duration': r['duration'], 'playCount': r['play_count'], 'commentCount': r['comment_count'] if 'comment_count' in r.keys() else 0,
       'createdAt': r['created_at'], 'streamUrl': f'{base}/api/tracks/{r["id"]}/stream', 'coverUrl': '', 'peaks': []
