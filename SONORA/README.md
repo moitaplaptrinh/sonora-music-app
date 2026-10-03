@@ -33,3 +33,5 @@ The app is then available from the Railway URL. The frontend and `/api/*` endpoi
 - Uploads are stored on the server volume; for large-scale use, replace with S3/R2-style object storage.
 - SQLite is fine for a small single-server community; for larger scale use PostgreSQL.
 - Add production rate limiting, CSRF protections, moderation, antivirus/media validation, backups, and HTTPS before a public launch with real users.
+
+SONORA online deployment
