@@ -31,15 +31,19 @@ OAUTH_STATE_TTL = int(os.environ.get('OAUTH_STATE_TTL_SECONDS', '600'))
 DB_LOCK = __import__('threading').RLock()
 
 def find_index():
-    # Serve the newest index*.html next to this script, so there is no need to rename files.
+    # Always serve the real app entrypoint. Never pick index.original.html,
+    # GitHub-scraped copies, or an older backup just because its mtime is newer.
     env = os.environ.get('SONORA_INDEX', '').strip()
     if env and (ROOT / env).is_file():
         return ROOT / env
-    cands = []
-    for pat in ('index*.html','sonora*.html','SONORA*.html'):
-        cands.extend(ROOT.glob(pat))
-    cands = sorted({p.resolve() for p in cands if p.is_file()}, key=lambda p: p.stat().st_mtime, reverse=True)
-    return cands[0] if cands else ROOT / 'index.html'
+    exact = ROOT / 'index.html'
+    if exact.is_file():
+        return exact
+    for name in ('SONORA.html', 'sonora.html'):
+        p = ROOT / name
+        if p.is_file():
+            return p
+    return exact
 
 # ---- live sync: every write bumps a revision; clients long-poll /api/sync ----
 import threading
@@ -591,6 +595,9 @@ class H(BaseHTTPRequestHandler):
                     c=db(); row=c.execute('SELECT * FROM users WHERE id=?',(u['id'],)).fetchone(); c.close()
                 u=public_user(row) if row else None
             return self.json(200,{'user':u})
+        if path=='/api/profile' and method=='GET':
+            key=(q.get('key') or ['me'])[0]
+            return self.get_profile(key)
         if path=='/api/profile' and method=='PATCH': return self.patch_profile()
         if path=='/api/auth/google' and method=='GET': return self.google_start()
         if path=='/api/auth/google/callback' and method=='GET': return self.google_callback(q)
@@ -803,14 +810,16 @@ class H(BaseHTTPRequestHandler):
         raw=urllib.parse.unquote(str(key or '')).strip()
         if raw.lower().startswith('u:'): raw=raw[2:]
         if raw.startswith('@'): raw=raw[1:]
+        raw=raw.strip()
         with DB_LOCK:
             c=db()
-            # Accept profile lookup by numeric ID, username, @username and u:username.
-            # Keep one canonical path so links copied from search/profile cards always resolve.
-            if raw.isdigit():
+            # Canonical profile lookup: signed-in user, numeric id, username, @username, or u:username.
+            if raw.lower() in ('', 'me', 'self') and viewer:
+                row=c.execute('SELECT * FROM users WHERE id=?',(viewer['id'],)).fetchone()
+            elif raw.isdigit():
                 row=c.execute('SELECT * FROM users WHERE id=?',(int(raw),)).fetchone()
             else:
-                norm=raw.lstrip('@').strip().lower()
+                norm=raw.lower()
                 row=c.execute('SELECT * FROM users WHERE lower(username)=?',(norm,)).fetchone()
             if not row:
                 c.close(); return self.json(404,{'error':'Profile not found'})
