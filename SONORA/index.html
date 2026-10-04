@@ -798,6 +798,49 @@ body{overscroll-behavior:none;-webkit-font-smoothing:antialiased;text-rendering:
   #mobileMoreBackdrop.open{display:block;}
 }
 @media(min-width:761px){#mobileQuickNav,#mobileMoreSheet,#mobileMoreBackdrop{display:none!important;}}
+
+
+/* SONORA popup focus mode v3: when a popup/sheet opens, show only that surface */
+#sonoraModalShield{position:fixed;inset:0;background:rgba(0,0,0,.78);backdrop-filter:blur(14px) saturate(105%);-webkit-backdrop-filter:blur(14px) saturate(105%);z-index:1000;display:none;pointer-events:auto;}
+body.modal-focus #sonoraModalShield{display:block;}
+body.modal-focus .app,
+body.modal-focus .pl,
+body.modal-focus #bgLayer,
+body.modal-focus #amb,
+body.modal-focus .toast{visibility:hidden!important;opacity:0!important;pointer-events:none!important;}
+body.modal-focus .ctx,
+body.modal-focus #fp,
+body.modal-focus #qv,
+body.modal-focus #cmd,
+body.modal-focus #mobileMoreSheet{z-index:1002!important;}
+body.modal-focus .ctx.open,
+body.modal-focus #fp.open,
+body.modal-focus #qv,
+body.modal-focus #cmd,
+body.modal-focus #mobileMoreSheet.open{visibility:visible!important;opacity:1!important;pointer-events:auto!important;}
+@media(max-width:760px){
+  body.modal-focus .ctx{
+    left:8px!important;right:8px!important;top:8px!important;bottom:8px!important;
+    width:auto!important;height:auto!important;max-height:none!important;
+    border-radius:24px!important;padding:10px!important;
+    transform:none!important;overflow:hidden!important;
+  }
+  body.modal-focus .ctx .cb{padding:2px 2px 18px!important;overflow:auto!important;-webkit-overflow-scrolling:touch;}
+  body.modal-focus #qv{
+    left:8px!important;right:8px!important;top:8px!important;bottom:8px!important;
+    width:auto!important;max-width:none!important;height:auto!important;
+    border-radius:24px!important;transform:none!important;overflow:auto!important;
+    padding:14px!important;
+  }
+  body.modal-focus #cmd{inset:8px!important;padding:0!important;align-items:flex-start!important;background:transparent!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important;}
+  body.modal-focus #cmd .cmb{width:100%!important;max-width:none!important;margin-top:8px!important;border-radius:22px!important;}
+  body.modal-focus #mobileMoreSheet{left:8px!important;right:8px!important;top:8px!important;bottom:8px!important;height:auto!important;max-height:none!important;border-radius:24px!important;transform:none!important;}
+  body.modal-focus #fp{inset:0!important;border-radius:0!important;}
+}
+@media(min-width:761px){
+  body.modal-focus .ctx{right:14px!important;top:14px!important;bottom:14px!important;width:min(520px,calc(100vw - 28px))!important;border-radius:26px!important;transform:none!important;}
+}
+
 </style>
 </head><body class="pz noauth"><div id="bgLayer"></div><div id="amb"></div>
 <div class="auth" id="authScreen"><button class="auth-back" id="authBack" style="display:none">← Back</button><button class="auth-skip" id="authSkip" style="display:none">Skip</button><div class="auth-card glass" id="authCard"></div></div>
@@ -1683,5 +1726,32 @@ afterAuth=async function(){await __afterAuthBeforeProfiles();await refreshOwnPro
     if(e.target.closest('canvas,input[type=range],button,.nv,.row,.card,.menu')) return;
   },{passive:true});
 })();
+
+// Popup focus manager: opening a sheet/modal temporarily hides the whole app.
+(function installPopupFocus(){
+  const isOpen=()=>!!(
+    document.querySelector('.ctx.open') ||
+    document.querySelector('#fp.open') ||
+    document.querySelector('#mobileMoreSheet.open') ||
+    document.querySelector('#qv') ||
+    document.querySelector('#cmd')
+  );
+  let shield=document.getElementById('sonoraModalShield');
+  if(!shield){
+    shield=document.createElement('div');
+    shield.id='sonoraModalShield';
+    shield.setAttribute('aria-hidden','true');
+    document.body.appendChild(shield);
+  }
+  const sync=()=>document.body.classList.toggle('modal-focus',isOpen());
+  shield.addEventListener('click',()=>{
+    const esc=new KeyboardEvent('keydown',{key:'Escape',bubbles:true});
+    document.dispatchEvent(esc);
+  });
+  const obs=new MutationObserver(sync);
+  obs.observe(document.body,{subtree:true,childList:true,attributes:true,attributeFilter:['class','style']});
+  sync();
+})();
+
 </script>
 </body></html>
