@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""SONORA mobile v1 - bien SONORA thanh app cai duoc tren dien thoai (PWA) va san sang dong goi APK.
+Dat file nay cung thu muc voi server.py (hoac sever.py) + index.html, roi chay:  python apply_mobile.py
+Script se:
+  1. Tao manifest.webmanifest, sw.js, icon-192.png, icon-512.png, icon-maskable-512.png (khong can cai them thu vien)
+  2. Va server.py  -> them route phuc vu cac file tren + /.well-known/assetlinks.json
+  3. Va index.html -> them the manifest/theme-color, dang ky service worker, vai dong CSS cho cam ung
+Moi file duoc backup thanh *.bak. Neu 1 diem va khong khop, file do KHONG bi ghi (an toan). Chay lai nhieu lan van an toan."""
+import json, re, shutil, struct, zlib
+from pathlib import Path
+
+MARK = 'sonora-mobile-v1'
+here = Path(__file__).resolve().parent
+
+# ---------------------------------------------------------------- assets
+MANIFEST = {
+    "id": "/",
+    "name": "SONORA",
+    "short_name": "SONORA",
+    "description": "SONORA - nghe, dang va chia se nhac.",
+    "start_url": "/",
+    "scope": "/",
+    "display": "standalone",
+    "background_color": "#050505",
+    "theme_color": "#050505",
+    "categories": ["music", "entertainment"],
+    "icons": [
+        {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+        {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+        {"src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+    ],
+}
+
+SW_JS = r'''// sonora-mobile-v1
+// Service worker toi gian: chi cache "vo" ung dung de mo nhanh / mo khi mat mang.
+// KHONG dung vao /api/*, audio stream hay /uploads/* (nhac luon di thang len server).
+const V = 'sonora-shell-v1';
+const SHELL = ['/', '/icon-192.png', '/icon-512.png', '/manifest.webmanifest'];
+
+self.addEventListener('install', e => {
+  e.waitUntil(caches.open(V).then(c => c.addAll(SHELL)).catch(() => {}));
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', e => {
+  e.waitUntil(
+    caches.keys()
+      .then(keys => Promise.all(keys.filter(k => k !== V).map(k => caches.delete(k))))
+      .then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener('fetch', e => {
+  const r = e.request;
+  if (r.method !== 'GET') return;
+  const u = new URL(r.url);
+  if (u.origin !== location.origin) return;
+
+  // Trang chinh: uu tien ban moi tu server, mat mang thi dung ban da luu
+  if (r.mode === 'navigate' && (u.pathname === '/' || u.pathname === '/index.html')) {
+    e.respondWith(
+      fetch(r).then(res => {
+        if (res.ok && res.type === 'basic' && !res.redirected) {
+          const copy = res.clone();
+          caches.open(V).then(c => c.put('/', copy)).catch(() => {});
+        }
+        return res;
+      }).catch(() => caches.match('/'))
+    );
+    return;
+  }
+
+  // Icon + manifest: cache-first
+  if (/^\/icon-.*\.png$/.test(u.pathname) || u.pathname === '/manifest.webmanifest') {
+    e.respondWith(caches.match(r).then(h => h || fetch(r)));
+  }
+});
+'''
+
+
+# ---------------------------------------------------------------- icon generator (pure python PNG)
+def _png(w, h, rgba):
+    def chunk(t, d):
+        c = struct.pack('>I', len(d)) + t + d
+        return c + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+    raw = bytearray()
+    for y in range(h):
+        raw.append(0)
+        raw += rgba[y * w * 4:(y + 1) * w * 4]
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0))
+            + chunk(b'IDAT', zlib.compress(bytes(raw), 9)) + chunk(b'IEND', b''))
+
+
+def make_icon(size, maskable):
+    """Nen den, 5 thanh equalizer trang (giong logo SONORA). maskable: nen tran vien, logo nho lai cho vao vung an toan."""
+    bg = (5, 5, 5)
+    fg = (244, 244, 242)
+    # chieu cao tuong doi cua 5 thanh (theo logo): 6, 14, 18, 10, 14
+    heights = [6, 14, 18, 10, 14]
+    scale = 0.50 if maskable else 0.56            # logo chiem bao nhieu phan icon
+    total_h = size * scale
+    unit = total_h / 18.0
+    bw = unit * 2.4 * 1.5                          # be rong thanh
+    gap = unit * 2.5 * 1.5 - bw + unit * 0.6
+    total_w = bw * 5 + gap * 4
+    x0 = (size - total_w) / 2
+    cy = size / 2
+    bars = []
+    for i, hh in enumerate(heights):
+        bx0 = x0 + i * (bw + gap)
+        bh = hh * unit
+        bars.append((bx0, cy - bh / 2, bx0 + bw, cy + bh / 2, bw / 2))
+    corner = 0 if maskable else size * 0.22
+    ss = 2                                         # sieu lay mau 2x2 cho muot canh
+    buf = bytearray(size * size * 4)
+    n = ss * ss
+
+    def in_bar(px, py):
+        for (a, b, c, d, r) in bars:
+            if px < a or px > c or py < b or py > d: continue
+            qx = min(max(px, a + r), c - r)
+            qy = min(max(py, b + r), d - r)
+            if (px - qx) ** 2 + (py - qy) ** 2 <= r * r: return True
+        return False
+
+    def in_round(px, py):
+        if corner == 0: return True
+        qx = min(max(px, corner), size - corner)
+        qy = min(max(py, corner), size - corner)
+        return (px - qx) ** 2 + (py - qy) ** 2 <= corner * corner
+
+    for y in range(size):
+        for x in range(size):
+            cov_bg = cov_fg = 0
+            for sy in range(ss):
+                for sx in range(ss):
+                    px = x + (sx + .5) / ss
+                    py = y + (sy + .5) / ss
+                    if in_round(px, py):
+                        cov_bg += 1
+                        if in_bar(px, py): cov_fg += 1
+            i = (y * size + x) * 4
+            if cov_bg == 0:
+                continue                           # trong suot
+            f = cov_fg / cov_bg
+            buf[i] = round(bg[0] + (fg[0] - bg[0]) * f)
+            buf[i + 1] = round(bg[1] + (fg[1] - bg[1]) * f)
+            buf[i + 2] = round(bg[2] + (fg[2] - bg[2]) * f)
+            buf[i + 3] = round(255 * cov_bg / n)
+    return _png(size, size, buf)
+
+
+def write_assets():
+    (here / 'manifest.webmanifest').write_text(json.dumps(MANIFEST, indent=2, ensure_ascii=False), encoding='utf-8')
+    (here / 'sw.js').write_text(SW_JS, encoding='utf-8')
+    for name, size, mk in (('icon-192.png', 192, False), ('icon-512.png', 512, False), ('icon-maskable-512.png', 512, True)):
+        (here / name).write_bytes(make_icon(size, mk))
+    (here / '.well-known').mkdir(exist_ok=True)
+    print('  + da tao: manifest.webmanifest, sw.js, icon-192.png, icon-512.png, icon-maskable-512.png')
+
+
+# ---------------------------------------------------------------- patches
+SPEC = r'''
+## SERVER
+@@ OLD
+    def serve_file(self,path,head=False):
+@@ NEW
+    # sonora-mobile-v1: file PWA (manifest, service worker, icon, assetlinks cho APK)
+    PWA_FILES={'/manifest.webmanifest':('manifest.webmanifest','application/manifest+json'),'/sw.js':('sw.js','application/javascript; charset=utf-8'),'/icon-192.png':('icon-192.png','image/png'),'/icon-512.png':('icon-512.png','image/png'),'/icon-maskable-512.png':('icon-maskable-512.png','image/png'),'/.well-known/assetlinks.json':('.well-known/assetlinks.json','application/json')}
+    def serve_pwa(self,path,head=False):
+        name,ctype=self.PWA_FILES[path]; f=ROOT/name
+        if not f.is_file(): return self.text(404,'Not found')
+        raw=f.read_bytes()
+        self.send_response(200); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(len(raw)))
+        self.send_header('Cache-Control','public, max-age=86400' if path.startswith('/icon-') else 'no-cache')
+        if path=='/sw.js': self.send_header('Service-Worker-Allowed','/')
+        self.end_headers()
+        if not head: self.wfile.write(raw)
+
+    def serve_file(self,path,head=False):
+@@ END
+@@ OLD
+        if path=='/favicon.ico': return self.text(204,'')
+@@ NEW
+        if path in self.PWA_FILES and method in ('GET','HEAD'): return self.serve_pwa(path, head=(method=='HEAD'))
+        if path=='/favicon.ico': return self.text(204,'')
+@@ END
+## INDEX
+@@ OLD
+<title>SONORA</title>
+@@ NEW
+<title>SONORA</title><!-- sonora-mobile-v1 --><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#F4F4F0" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#050505" media="(prefers-color-scheme: dark)"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="SONORA"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><link rel="apple-touch-icon" href="/icon-192.png"><link rel="icon" type="image/png" href="/icon-192.png">
+@@ END
+@@ OLD
+</style></head>
+@@ NEW
+html{-webkit-text-size-adjust:100%;overscroll-behavior-y:none}*{-webkit-tap-highlight-color:transparent}button,a,.nv,.ic,.btn,.row,.chip,.tb{touch-action:manipulation}
+</style></head>
+@@ END
+@@ OLD
+</body>
+@@ NEW
+<script>if('serviceWorker'in navigator&&(location.protocol==='https:'||location.hostname==='localhost'||location.hostname==='127.0.0.1')){addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}))}</script></body>
+@@ END
+'''
+
+
+def parse(spec):
+    out, cur, mode, old, new = {'SERVER': [], 'INDEX': []}, None, None, [], []
+    for line in spec.split('\n'):
+        if mode is None and line.startswith('## '):
+            cur = line[3:].strip(); continue
+        if line == '@@ OLD':
+            mode, old, new = 'old', [], []; continue
+        if line == '@@ NEW':
+            mode = 'new'; continue
+        if line == '@@ END':
+            out[cur].append(('\n'.join(old), '\n'.join(new))); mode = None; continue
+        if mode == 'old': old.append(line)
+        elif mode == 'new': new.append(line)
+    return out
+
+
+def patch(path, items):
+    s = path.read_bytes().decode('utf-8')
+    if MARK in s:
+        print('  - da va truoc do, bo qua:', path.name); return
+    nl = '\r\n' if '\r\n' in s else '\n'
+    bad = []
+    for i, (old, new) in enumerate(items, 1):
+        old_n, new_n = old.replace('\n', nl), new.replace('\n', nl)
+        c = s.count(old_n)
+        if c != 1: bad.append((i, c, old[:80])); continue
+        s = s.replace(old_n, new_n)
+    if bad:
+        print('  ! KHONG ghi', path.name, '- cac diem va khong khop (so lan tim thay):')
+        for i, c, o in bad: print('     #%d  x%d  %s' % (i, c, o))
+        return
+    shutil.copy2(path, path.with_name(path.name + '.bak'))
+    path.write_bytes(s.encode('utf-8'))
+    print('  + da va %d diem: %s (backup: %s.bak)' % (len(items), path.name, path.name))
+
+
+def main():
+    spec = parse(SPEC)
+    srv = next((here / n for n in ('sever.py', 'server.py') if (here / n).is_file()), None)
+    pages = [p for pat in ('index*.html', 'sonora*.html', 'SONORA*.html') for p in here.glob(pat) if p.is_file()]
+    idx = max(pages, key=lambda p: p.stat().st_mtime) if pages else None
+    print('Server:   ', srv.name if srv else 'KHONG THAY sever.py/server.py')
+    print('Giao dien:', idx.name if idx else 'KHONG THAY index*.html')
+    write_assets()
+    if srv: patch(srv, spec['SERVER'])
+    if idx: patch(idx, spec['INDEX'])
+    print('\nXong. Tat server cu, chay lai: python server.py -> mo trinh duyet, Ctrl+F5.')
+    print('Nho upload them len GitHub: manifest.webmanifest, sw.js, 3 file icon-*.png (va thu muc .well-known sau khi co assetlinks.json).')
+
+
+if __name__ == '__main__':
+    main()
