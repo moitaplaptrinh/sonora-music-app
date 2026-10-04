@@ -803,7 +803,8 @@ body{overscroll-behavior:none;-webkit-font-smoothing:antialiased;text-rendering:
 /* SONORA popup focus mode v3: when a popup/sheet opens, show only that surface */
 #sonoraModalShield{position:fixed;inset:0;background:rgba(0,0,0,.78);backdrop-filter:blur(14px) saturate(105%);-webkit-backdrop-filter:blur(14px) saturate(105%);z-index:1000;display:none;pointer-events:auto;}
 body.modal-focus #sonoraModalShield{display:block;}
-body.modal-focus .app,
+body.modal-focus .app{visibility:visible!important;opacity:1!important;pointer-events:none!important;z-index:1001!important;}
+body.modal-focus .app > :not(.ctx){visibility:hidden!important;opacity:0!important;pointer-events:none!important;}
 body.modal-focus .pl,
 body.modal-focus #bgLayer,
 body.modal-focus #amb,
