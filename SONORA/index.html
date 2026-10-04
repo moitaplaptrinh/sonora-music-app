@@ -203,7 +203,7 @@ async function bootAPI(){
 }
 async function refreshCommunity(){if(!API.online)return;try{const r=await apiFetch('/api/recommendations?limit=12');communityTracks=r.tracks||[]}catch(_){}try{const r=await apiFetch('/api/tracks?limit=200&sort=popular');communityTracks=(r.tracks||communityTracks)}catch(_){}try{const r=await apiFetch('/api/playlists');communityPlaylists=r.playlists||[]}catch(_){} /* render is triggered after remote library hydration */}
 async function markServerPlay(t){if(!backendReady()||!t?.serverId)return;try{await apiJson('/api/tracks/'+t.serverId+'/play',{})}catch(_){}refreshCommunity()}
-function serverTrackToLocal(s){const mine=!!(API.user&&s.owner&&String(s.owner.id)===String(API.user.id));return{id:'s'+s.id,serverId:s.id,title:s.title,artist:s.artist||'Unknown artist',album:s.album||'',genre:s.genre||'',tags:s.tags||'',vis:s.visibility||'Public',explicit:!!s.explicit,url:s.streamUrl||('/api/tracks/'+s.id+'/stream'),dur:+s.duration||0,peaks:s.peaks||[],cover:s.coverUrl||'',up:mine?1:0,mine,owner:s.owner||null,size:+s.size||0,seed:(+s.id%8)+1,playCount:+s.playCount||0,commentCount:+s.commentCount||0,createdAt:s.createdAt}}
+function serverTrackToLocal(s){const mine=!!(API.user&&s.owner&&String(s.owner.id)===String(API.user.id));const stream=s.streamUrl||('/api/tracks/'+s.id+'/stream');return{id:'s'+s.id,serverId:s.id,title:s.title,artist:s.artist||'Unknown artist',album:s.album||'',genre:s.genre||'',tags:s.tags||'',vis:s.visibility||'Public',explicit:!!s.explicit,serverUrl:stream,url:stream,streamUrl:stream,dur:+s.duration||0,peaks:s.peaks||[],cover:s.coverUrl||'',up:mine?1:0,mine,owner:s.owner||null,size:+s.size||0,seed:(+s.id%8)+1,playCount:+s.playCount||0,commentCount:+s.commentCount||0,createdAt:s.createdAt}}
 async function loadCommunity(){if(!API.online)return;try{const r=await apiFetch('/api/tracks?limit=200&sort=popular');for(const s of (r.tracks||[])){const t=serverTrackToLocal(s),old=B[t.id];if(old)Object.assign(old,t);else{T.push(t);B[t.id]=t}}}catch(_){}
 }
 
@@ -228,7 +228,7 @@ function loop(){draw();raf=!au.paused&&!document.hidden?requestAnimationFrame(lo
 async function load(id,play=true){
 const t=B[id];if(!t)return;cur=t;qi=q.indexOf(id);counted=false;
 const localPlayable=!(t.serverId&&location.protocol==='file:');
-const m=(t.url&&localPlayable)?{url:t.url,peaks:normalizePeaks(t,t.peaks)}:(t.serverId&&API.online?{url:t.streamUrl||('/api/tracks/'+t.serverId+'/stream'),peaks:normalizePeaks(t,t.peaks)}:synth(t));
+const localUrl=t.localUrl||((t.url&&!t.serverId)?t.url:'');const cloudUrl=t.serverUrl||t.streamUrl||(t.serverId?'/api/tracks/'+t.serverId+'/stream':'');const m=(t.serverId&&API.online&&cloudUrl)?{url:cloudUrl,peaks:normalizePeaks(t,t.peaks)}:(localPlayable&&localUrl)?{url:localUrl,peaks:normalizePeaks(t,t.peaks)}:synth(t);
 try{au.pause();au.removeAttribute('src');au.load()}catch(_){}
 au.src=m.url;peaks=m.peaks;au.playbackRate=rate;au.volume=vol;au.load();
 $('#inf').innerHTML=`<div class="cov" data-a="fp" style="${cov(t)}"></div><div class="rt1"><b>${E(t.title)}</b><span>${E(t.artist)}</span>${authorMarkup(t)}</div><button class="ic" data-a="like" data-id="${t.id}">${liked.includes(t.id)?'♥&#xFE0E;':'♡&#xFE0E;'}</button>`;
@@ -264,7 +264,7 @@ const sc=t=>liked.concat(hist).filter(i=>B[i]&&B[i].artist===t.artist).length;
 function next(auto){if(!cur)return;if(auto&&rep===2){au.currentTime=0;au.play();return}let i=q.indexOf(cur.id)+1;if(i>=q.length){if(rep===1)i=0;else if(auto&&ap){const r=T.filter(t=>!q.includes(t.id)).sort((a,b)=>sc(b)-sc(a))[0]||T.find(t=>t.id!==cur.id);if(r){q.push(r.id);i=q.length-1}else return}else return}load(q[i])}
 function prev(){if(!cur)return;if(au.currentTime>3){au.currentTime=0;return}const i=q.indexOf(cur.id);i>0?load(q[i-1]):au.currentTime=0}
 au.addEventListener('play',()=>{document.body.classList.remove('pz');ppset('❚❚&#xFE0E;');if(!raf)loop();if(AC?.state==='suspended')AC.resume().catch(()=>{})});au.addEventListener('pause',()=>{document.body.classList.add('pz');ppset('▶&#xFE0E;');draw()});
-au.addEventListener('loadedmetadata',()=>{if(cur&&(!cur.dur||!isFinite(cur.dur)))cur.dur=au.duration;draw()});au.addEventListener('canplay',()=>{if(cur&&cur._autoplayPending){cur._autoplayPending=false;const p=au.play();if(p?.catch)p.catch(()=>{})}});au.addEventListener('stalled',()=>console.warn('SONORA audio stalled',au.src));au.addEventListener('timeupdate',()=>{lsync();const threshold=Math.min(8,Math.max(1,(cur?.dur||au.duration||30)*.2));if(!counted&&cur&&au.currentTime>=threshold){counted=true;hist=[cur.id,...hist.filter(x=>x!==cur.id)].slice(0,30);SV('hist',hist);markServerPlay(cur);cur.playCount=(cur.playCount||0)+1}if(!raf)draw()});au.addEventListener('ended',()=>{if(slp==='track'){slp=0;toast('Sleep timer ended');return}next(true)});au.addEventListener('error',()=>{if(au.src)toast('Unable to play this track. Skip or retry.')});
+au.addEventListener('loadedmetadata',()=>{if(cur&&(!cur.dur||!isFinite(cur.dur)))cur.dur=au.duration;draw()});au.addEventListener('canplay',()=>{if(cur&&cur._autoplayPending){cur._autoplayPending=false;const p=au.play();if(p?.catch)p.catch(()=>{})}});au.addEventListener('stalled',()=>console.warn('SONORA audio stalled',au.src));au.addEventListener('timeupdate',()=>{lsync();const threshold=Math.min(8,Math.max(1,(cur?.dur||au.duration||30)*.2));if(!counted&&cur&&au.currentTime>=threshold){counted=true;hist=[cur.id,...hist.filter(x=>x!==cur.id)].slice(0,30);SV('hist',hist);markServerPlay(cur);cur.playCount=(cur.playCount||0)+1}if(!raf)draw()});au.addEventListener('ended',()=>{if(slp==='track'){slp=0;toast('Sleep timer ended');return}next(true)});au.addEventListener('error',async()=>{if(!cur)return;const local=cur.localUrl;if(cur.serverId&&local&&au.src!==local){try{au.src=local;au.load();const p=au.play();if(p?.catch)p.catch(()=>{});return}catch(_){}}if(au.src)toast('Unable to play this track. Skip or retry.')});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!au.paused&&!raf)loop()});
 const seek=e=>{const r=e.currentTarget.getBoundingClientRect();if(au.duration)au.currentTime=Math.min(1,Math.max(0,(e.clientX-r.left)/r.width))*au.duration;draw()};
 $('#cv').addEventListener('pointerdown',e=>{e.target.setPointerCapture(e.pointerId);seek(e);e.target.onpointermove=seek});$('#cv').addEventListener('pointerup',e=>e.target.onpointermove=null);
@@ -421,7 +421,7 @@ async function uploadTrack(t,file,cb){
   if(cb){const ty=cb.type||'image/jpeg';fd.append('cover',new File([cb],'cover.'+(ty.split('/')[1]||'jpg').replace('jpeg','jpg'),{type:ty}))}
   const r=await apiFetch('/api/tracks',{method:'POST',body:fd});
   const serverTrack=r&&r.track;if(!serverTrack||!serverTrack.id)throw new Error('Server did not return the published track');
-  t.serverId=serverTrack.id;t.createdAt=serverTrack.createdAt;t.playCount=0;t.commentCount=0;t.mine=true;t.owner=serverTrack.owner;t.streamUrl=serverTrack.streamUrl||('/api/tracks/'+serverTrack.id+'/stream');
+  t.serverId=serverTrack.id;t.createdAt=serverTrack.createdAt;t.playCount=serverTrack.playCount||0;t.commentCount=serverTrack.commentCount||0;t.mine=true;t.owner=serverTrack.owner;t.serverUrl=serverTrack.streamUrl||('/api/tracks/'+serverTrack.id+'/stream');t.streamUrl=t.serverUrl;t.localUrl=t.url;t.url=t.serverUrl;
   if(serverTrack.coverUrl&&!t.cover)t.cover=serverTrack.coverUrl;
   await idbTag(t.id,t.serverId);return t;
 }
@@ -624,8 +624,8 @@ const seen=new Set();
 for(const s of list){seen.add(String(s.id));const n=serverTrackToLocal(s);let t=twinOf(s.id);
 if(!t&&n.mine){t=T.find(x=>x.up&&!x.serverId&&String(x.id)[0]==='u'&&x.title===n.title&&x.artist===n.artist&&(!x.size||!n.size||x.size===n.size));if(t){t.serverId=s.id;idbTag(t.id,s.id)}}
 if(!t){T.push(n);B[n.id]=n;continue}
-if(String(t.id)[0]==='s'){if(t._blobUrl)n.url=t.url;Object.assign(t,n)}
-else{t.playCount=n.playCount;t.commentCount=n.commentCount;t.createdAt=n.createdAt;t.owner=n.owner;t.mine=n.mine;if(!t.cover&&n.cover)t.cover=n.cover;if(!(t.peaks&&t.peaks.length)&&n.peaks.length)t.peaks=n.peaks;if(!t.dur&&n.dur)t.dur=n.dur}}
+if(String(t.id)[0]==='s'){const oldLocal=t.localUrl||((t.url&&String(t.url).startsWith('blob:'))?t.url:'');Object.assign(t,n);if(oldLocal&&!t.localUrl)t.localUrl=oldLocal;if(t._blobUrl)t.localUrl=t._blobUrl}
+else{const oldLocal=t.localUrl||((t.url&&String(t.url).startsWith('blob:'))?t.url:'');t.playCount=n.playCount;t.commentCount=n.commentCount;t.createdAt=n.createdAt;t.owner=n.owner;t.mine=n.mine;t.serverUrl=n.serverUrl;t.streamUrl=n.streamUrl;if(oldLocal)t.localUrl=oldLocal;t.url=n.serverUrl;if(!t.cover&&n.cover)t.cover=n.cover;if(!(t.peaks&&t.peaks.length)&&n.peaks.length)t.peaks=n.peaks;if(!t.dur&&n.dur)t.dur=n.dur}}
 for(const t of T.slice())if(t.serverId&&String(t.id)[0]==='s'&&!seen.has(String(t.serverId))){T.splice(T.indexOf(t),1);delete B[t.id];q=q.filter(i=>i!==t.id);orig=orig.filter(i=>i!==t.id)}}
 function repaint(){
 const sig=JSON.stringify([T.map(t=>[t.id,t.title,t.artist,t.cover,t.commentCount,t.vis].join('~')),communityPlaylists.map(p=>[p.id,p.name,p.updatedAt,p.trackIds.length].join('~'))]);
@@ -685,7 +685,7 @@ bootLoop();
 async function loadRemote(){try{const r=await apiFetch('/api/tracks?limit=200&sort=popular');for(const s of (r.tracks||[])){const t=serverTrackToLocal(s);if(!B[t.id]){T.push(t);B[t.id]=t}else Object.assign(B[t.id],t)}try{const pr=await apiFetch('/api/playlists');communityPlaylists=pr.playlists||[]}catch(_){}if(view==='home'||view==='disc'||view==='lib')render()}catch(_){}}
 
 addEventListener('resize',draw);$('#bs').style.opacity=.45;if(LS('dens')==='p')document.body.classList.add('cp');applyTheme();applyCS();cxset(cxo);try{const mh=String(location.hash||'');if(/^#profile\//i.test(mh)){view='profile';arg='u:'+decodeURIComponent(mh.slice(9));}}catch(_){}render();rq();
-window.__idbReady=idbAll().then(rs=>{rs.forEach(r=>{const t={...r,url:URL.createObjectURL(r.blob),up:1};delete t.blob;delete t.cb;if(r.cb)t.cover=URL.createObjectURL(r.cb);T.push(t);B[t.id]=t});if(rs.length)render()}).then(()=>{const sv=LS('cur');if(sv&&B[sv.id]){q=(sv.q||[]).filter(i=>B[i]);if(!q.includes(sv.id))q=[sv.id];orig=q.slice();load(sv.id,false)}else draw()});
+window.__idbReady=idbAll().then(rs=>{rs.forEach(r=>{const localUrl=r.blob?URL.createObjectURL(r.blob):'';const t={...r,localUrl,url:(r.serverId?('/api/tracks/'+r.serverId+'/stream'):localUrl),up:1};if(r.serverId)t.serverUrl=t.streamUrl=t.url;delete t.blob;delete t.cb;if(r.cb)t.cover=URL.createObjectURL(r.cb);T.push(t);B[t.id]=t});if(rs.length)render()}).then(()=>{const sv=LS('cur');if(sv&&B[sv.id]){q=(sv.q||[]).filter(i=>B[i]);if(!q.includes(sv.id))q=[sv.id];orig=q.slice();load(sv.id,false)}else draw()});
 
 /* ---- v3 additions ---- */
 (()=>{
