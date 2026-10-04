@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# sonora-fix-v4
 import os, re, json, hmac, hashlib, secrets, sqlite3, mimetypes, urllib.parse, urllib.error, base64
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import Request as UrlRequest, urlopen
@@ -201,6 +202,8 @@ def init_db():
             except sqlite3.OperationalError:
                 pass
         c.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub)')
+        for r in c.execute("SELECT id,cover_url,background_url FROM playlists WHERE cover_url LIKE 'data:%' OR background_url LIKE 'data:%'").fetchall():
+            c.execute('UPDATE playlists SET cover_url=?,background_url=? WHERE id=?',(_pl_img(r['cover_url'],'cov_'),_pl_img(r['background_url'],'pbg_'),r['id']))
         c.commit(); c.close()
 
 def scrypt_hash(password, salt=None):
@@ -468,6 +471,24 @@ def _remove_upload(url):
         except OSError: pass
 
 
+def _pl_img(v, prefix):
+    # playlist images arrive as data URLs: store them as small hashed files, not in the DB / every sync response
+    if not v or not isinstance(v, str): return ''
+    if v.startswith('/uploads/'): return v
+    if not v.startswith('data:image/'): return ''
+    try:
+        head, raw = v.split(',', 1)
+        ext = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif'}[head.split(';', 1)[0].split(':', 1)[1].lower()]
+        blob = base64.b64decode(raw, validate=True)
+    except Exception:
+        return ''
+    if len(blob) > 8 * 1024 * 1024: return ''
+    name = prefix + hashlib.sha1(blob).hexdigest()[:20] + ext
+    path = UPLOAD_DIR / name
+    if not path.exists(): path.write_bytes(blob)
+    return '/uploads/' + name
+
+
 class H(BaseHTTPRequestHandler):
     server_version = 'SONORA/1.0'
     def log_message(self, fmt, *args):
@@ -495,7 +516,8 @@ class H(BaseHTTPRequestHandler):
         body=self.read_body(); out={}; files={}
         for part in body.split(b'--'+boundary):
             if not part or part in (b'--',b'--\r\n'): continue
-            part=part.strip(b'\r\n')
+            if part.startswith(b'\r\n'): part=part[2:]
+            if part.endswith(b'\r\n'): part=part[:-2]
             if b'\r\n\r\n' not in part: continue
             hb,data=part.split(b'\r\n\r\n',1)
             headers={}
@@ -505,7 +527,7 @@ class H(BaseHTTPRequestHandler):
             disp=headers.get('content-disposition','')
             nm=re.search(r'name="([^"]+)"',disp); fn=re.search(r'filename="([^"]*)"',disp)
             if not nm: continue
-            name=nm.group(1); data=data.rstrip(b'\r\n')
+            name=nm.group(1)
             if fn:
                 files[name]={'filename':fn.group(1),'content_type':headers.get('content-type','application/octet-stream'),'data':data}
             else:
@@ -550,7 +572,7 @@ class H(BaseHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin',origin)
             self.send_header('Vary','Origin')
         self.send_header('Access-Control-Allow-Credentials','true')
-        self.send_header('Access-Control-Allow-Headers','Content-Type')
+        self.send_header('Access-Control-Allow-Headers','Content-Type, Authorization')
         self.send_header('Access-Control-Allow-Methods','GET,POST,PATCH,DELETE,OPTIONS')
         self.end_headers()
     def route(self,method):
@@ -623,6 +645,7 @@ class H(BaseHTTPRequestHandler):
         ctype=mimetypes.guess_type(str(path))[0] or 'application/octet-stream'; size=path.stat().st_size
         self.send_response(200); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(size))
         if ctype.startswith('text/html'): self.send_header('Cache-Control','no-cache')
+        elif ctype.startswith('image/'): self.send_header('Cache-Control','public, max-age=604800, immutable')
         self.end_headers()
         if head: return
         with path.open('rb') as f:
@@ -787,8 +810,8 @@ class H(BaseHTTPRequestHandler):
             if not row:
                 c.close(); return self.json(404,{'error':'Profile not found'})
             uid=row['id']; is_owner=bool(viewer and int(viewer['id'])==int(uid))
-            visible_tracks='t.user_id=?' if is_owner else 't.user_id=? AND t.visibility IN ("Public","Unlisted")'
-            visible_playlists='p.user_id=?' if is_owner else 'p.user_id=? AND p.visibility IN ("Public","Unlisted")'
+            visible_tracks='t.user_id=?' if is_owner else "t.user_id=? AND t.visibility='Public'"
+            visible_playlists='p.user_id=?' if is_owner else "p.user_id=? AND p.visibility='Public'"
             tracks=c.execute(TRACK_SELECT+f' WHERE {visible_tracks} ORDER BY t.created_at DESC LIMIT 200',(uid,)).fetchall()
             pls=c.execute(f'SELECT p.* FROM playlists p WHERE {visible_playlists} ORDER BY p.updated_at DESC LIMIT 200',(uid,)).fetchall()
             track_count=c.execute(f'SELECT COUNT(*) n FROM tracks t WHERE {visible_tracks}',(uid,)).fetchone()['n']
@@ -796,7 +819,7 @@ class H(BaseHTTPRequestHandler):
             followers=c.execute('SELECT COUNT(*) n FROM follows WHERE following_id=?',(uid,)).fetchone()['n']
             following=c.execute('SELECT COUNT(*) n FROM follows WHERE follower_id=?',(uid,)).fetchone()['n']
             follows_me=bool(viewer and c.execute('SELECT 1 FROM follows WHERE follower_id=? AND following_id=?',(viewer['id'],uid)).fetchone())
-            total_plays=c.execute('SELECT COALESCE(SUM(play_count),0) n FROM tracks WHERE user_id=? AND visibility IN ("Public","Unlisted")',(uid,)).fetchone()['n']
+            total_plays=c.execute("SELECT COALESCE(SUM(play_count),0) n FROM tracks WHERE user_id=? AND visibility='Public'",(uid,)).fetchone()['n']
             data={
                 'user':public_user(row, include_email=is_owner),
                 'viewerIsOwner':is_owner, 'following':follows_me,
@@ -836,11 +859,11 @@ class H(BaseHTTPRequestHandler):
         viewer=get_user_from_handler(self)
         with DB_LOCK:
             c=db()
-            track_clause='(t.visibility IN ("Public","Unlisted") OR t.user_id=?)' if viewer else 't.visibility IN ("Public","Unlisted")'
+            track_clause="(t.visibility='Public' OR t.user_id=?)" if viewer else "t.visibility='Public'"
             targs=[like,like,like,like,like,like]
             if viewer: targs.append(viewer['id'])
             trows=c.execute(TRACK_SELECT+f" WHERE (t.title LIKE ? ESCAPE '!' OR t.artist LIKE ? ESCAPE '!' OR t.album LIKE ? ESCAPE '!' OR t.tags LIKE ? ESCAPE '!' OR u.name LIKE ? ESCAPE '!' OR u.username LIKE ? ESCAPE '!') AND {track_clause} ORDER BY t.created_at DESC LIMIT {limit}",tuple(targs)).fetchall()
-            prows=c.execute("SELECT p.*,u.id AS owner_id,u.name AS owner_name,u.username AS owner_username,u.avatar_url AS owner_avatar,u.background_url AS owner_background,u.bio AS owner_bio FROM playlists p JOIN users u ON u.id=p.user_id WHERE (p.name LIKE ? ESCAPE '!' OR p.description LIKE ? ESCAPE '!') AND (p.visibility IN ('Public','Unlisted') OR p.user_id=?) ORDER BY p.updated_at DESC LIMIT "+str(limit),(like,like,viewer['id'] if viewer else -1)).fetchall()
+            prows=c.execute("SELECT p.*,u.id AS owner_id,u.name AS owner_name,u.username AS owner_username,u.avatar_url AS owner_avatar,u.background_url AS owner_background,u.bio AS owner_bio FROM playlists p JOIN users u ON u.id=p.user_id WHERE (p.name LIKE ? ESCAPE '!' OR p.description LIKE ? ESCAPE '!') AND (p.visibility='Public' OR p.user_id=?) ORDER BY p.updated_at DESC LIMIT "+str(limit),(like,like,viewer['id'] if viewer else -1)).fetchall()
             urows=c.execute('''SELECT u.*, (SELECT COUNT(*) FROM tracks t WHERE t.user_id=u.id AND t.visibility IN ('Public','Unlisted')) AS track_count,
                                   (SELECT COUNT(*) FROM playlists p WHERE p.user_id=u.id AND p.visibility IN ('Public','Unlisted')) AS playlist_count
                                FROM users u WHERE u.name LIKE ? ESCAPE '!' OR u.username LIKE ? ESCAPE '!' ORDER BY CASE WHEN lower(u.username)=lower(?) THEN 0 WHEN lower(u.name)=lower(?) THEN 1 ELSE 2 END, u.name LIMIT '''+str(limit),(like,like,term,term)).fetchall()
@@ -851,8 +874,8 @@ class H(BaseHTTPRequestHandler):
         return self.json(200,data)
 
     def visible_track_clause(self,u):
-        if u: return '(t.visibility="Public" OR t.visibility="Unlisted" OR t.user_id=?)', [u['id']]
-        return '(t.visibility="Public")', []
+        if u: return "(t.visibility='Public' OR t.user_id=?)", [u['id']]
+        return "t.visibility='Public'", []
 
     def tracks(self):
         u=get_user_from_handler(self); qs=urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query); limit=max(1,min(int(qs.get('limit',['50'])[0]),1000)); sort=qs.get('sort',['popular'])[0]
@@ -967,8 +990,8 @@ class H(BaseHTTPRequestHandler):
         return v if v in ('Public','Unlisted','Private') else default
 
     def get_playlists(self):
-        u=get_user_from_handler(self); uid=u['id'] if u else 0; clause='p.visibility="Public"'; args=[]
-        if u: clause='(p.visibility="Public" OR p.visibility="Unlisted" OR p.user_id=?)'; args=[u['id']]
+        u=get_user_from_handler(self); uid=u['id'] if u else 0; clause="p.visibility='Public'"; args=[]
+        if u: clause="(p.visibility='Public' OR p.user_id=?)"; args=[u['id']]
         with DB_LOCK:
             c=db(); rows=c.execute(f'SELECT p.* FROM playlists p WHERE {clause} ORDER BY p.updated_at DESC LIMIT 200',args).fetchall(); data=[playlist_json(c,r,'',uid) for r in rows]; c.close()
         return self.json(200,{'playlists':data})
@@ -977,7 +1000,7 @@ class H(BaseHTTPRequestHandler):
         c.execute('DELETE FROM playlist_tracks WHERE playlist_id=?',(pid,))
         pos=0
         for tid in ids:
-            if c.execute('SELECT 1 FROM tracks WHERE id=? AND (user_id=? OR visibility IN ("Public","Unlisted"))',(tid,u['id'])).fetchone():
+            if c.execute("SELECT 1 FROM tracks WHERE id=? AND (user_id=? OR visibility IN ('Public','Unlisted'))",(tid,u['id'])).fetchone():
                 c.execute('INSERT OR IGNORE INTO playlist_tracks(playlist_id,track_id,position) VALUES(?,?,?)',(pid,tid,pos)); pos+=1
 
     def create_playlist(self):
@@ -987,7 +1010,7 @@ class H(BaseHTTPRequestHandler):
         ids=[int(x) for x in (d.get('trackIds') or []) if str(x).isdigit()]
         with DB_LOCK:
             c=db(); now=now_iso()
-            cur=c.execute('INSERT INTO playlists(user_id,name,artist,description,visibility,cover_url,background_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',(u['id'],name,str(d.get('artist',''))[:120],str(d.get('description',''))[:500],vis,d.get('coverData','') or '',d.get('backgroundData','') or '',now,now)); pid=cur.lastrowid
+            cur=c.execute('INSERT INTO playlists(user_id,name,artist,description,visibility,cover_url,background_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',(u['id'],name,str(d.get('artist',''))[:120],str(d.get('description',''))[:500],vis,_pl_img(d.get('coverData',''),'cov_'),_pl_img(d.get('backgroundData',''),'pbg_'),now,now)); pid=cur.lastrowid
             self.set_playlist_tracks(c,pid,u,ids)
             c.commit(); r=c.execute('SELECT * FROM playlists WHERE id=?',(pid,)).fetchone(); data=playlist_json(c,r,'',u['id']); c.close()
         bump()
@@ -1002,7 +1025,7 @@ class H(BaseHTTPRequestHandler):
             if not p: c.close(); return self.json(404,{'error':'Playlist not found'})
             name=str(d.get('name',p['name'])).strip()[:120] or p['name']
             vis=self.playlist_vis(d,p['visibility'])
-            c.execute('UPDATE playlists SET name=?,artist=?,description=?,visibility=?,cover_url=?,background_url=?,updated_at=? WHERE id=?',(name,str(d.get('artist',p['artist']))[:120],str(d.get('description',p['description']))[:500],vis,(d.get('coverData',p['cover_url']) or ''),(d.get('backgroundData',p['background_url']) or ''),now_iso(),pid))
+            c.execute('UPDATE playlists SET name=?,artist=?,description=?,visibility=?,cover_url=?,background_url=?,updated_at=? WHERE id=?',(name,str(d.get('artist',p['artist']))[:120],str(d.get('description',p['description']))[:500],vis,_pl_img(d.get('coverData',p['cover_url']),'cov_'),_pl_img(d.get('backgroundData',p['background_url']),'pbg_'),now_iso(),pid))
             if 'trackIds' in d:
                 self.set_playlist_tracks(c,pid,u,[int(x) for x in (d.get('trackIds') or []) if str(x).isdigit()])
             c.commit(); r=c.execute('SELECT * FROM playlists WHERE id=?',(pid,)).fetchone(); data=playlist_json(c,r,'',u['id']); c.close()
@@ -1070,6 +1093,7 @@ class H(BaseHTTPRequestHandler):
         if not rate_ok('event:%s'%u['id'],10,3600): return self.json(429,{'error':'Event limit reached, try later'})
         with DB_LOCK:
             c=db(); cur=c.execute('INSERT INTO events(user_id,title,kind,place,description,starts_at,created_at) VALUES(?,?,?,?,?,?,?)',(u['id'],title,kind,str(d.get('place',''))[:80],str(d.get('description',''))[:300],starts,now_iso())); c.execute('INSERT OR IGNORE INTO event_rsvps VALUES(?,?)',(cur.lastrowid,u['id'])); c.commit(); c.close()
+        bump()
         return self.json(201,{'ok':True})
 
     def rsvp_event(self,eid):
@@ -1083,6 +1107,7 @@ class H(BaseHTTPRequestHandler):
                 c.execute('INSERT INTO event_rsvps VALUES(?,?)',(eid,u['id'])); going=True
                 if ev['user_id']!=u['id']: c.execute('INSERT INTO notifications(user_id,type,title,body,created_at) VALUES(?,?,?,?,?)',(ev['user_id'],'event','New RSVP',f"{u['name']} is going to {ev['title']}",now_iso()))
             c.commit(); c.close()
+        bump()
         return self.json(200,{'going':going})
 
     def delete_track(self,tid):
