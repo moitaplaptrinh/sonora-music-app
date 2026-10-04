@@ -571,7 +571,235 @@ body,input,button,textarea,select{touch-action:manipulation}
   .ctx{bottom:calc(116px + env(safe-area-inset-bottom,0px))!important;height:min(70dvh,420px)!important}
 }
 
-</style></head><body class="pz noauth"><div id="bgLayer"></div><div id="amb"></div>
+</style>
+<style id="sonora-full-responsive-v1">
+/* SONORA full responsive UI: Spotify-like desktop + reference-inspired mobile */
+:root{
+  --sonora-accent:#dfffe0;
+  --sonora-green:#1ed760;
+  --sonora-surface:#101010;
+  --sonora-surface-2:#171717;
+  --sonora-line:rgba(255,255,255,.08);
+  --sonora-shadow:0 20px 70px rgba(0,0,0,.38);
+}
+html{background:var(--bg);}
+body{overscroll-behavior:none;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;}
+/* ---------- Desktop: Spotify-like information architecture ---------- */
+@media(min-width:1181px){
+  .app{
+    grid-template-columns:236px minmax(0,1fr) 320px;
+    grid-template-rows:72px minmax(0,1fr);
+    grid-template-areas:"top top top" "side main ctx";
+    gap:10px;
+    padding:10px 10px 98px;
+  }
+  .top{min-height:72px;padding:10px 14px;border-radius:18px;background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.035));}
+  .side{border-radius:18px;padding:14px 10px;background:linear-gradient(180deg,rgba(255,255,255,.055),rgba(255,255,255,.025));}
+  .main{border-radius:18px;padding:28px 30px 30px;background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.018));}
+  .ctx{border-radius:18px;padding:12px;background:linear-gradient(180deg,rgba(255,255,255,.055),rgba(255,255,255,.025));}
+  .sc{letter-spacing:.11em;font-size:10px;padding:14px 12px 7px;}
+  .nv{min-height:40px;font-size:13px;}
+  .nv.on{background:rgba(255,255,255,.09);}
+  .top .sbox{max-width:690px;}
+  .sbox .in{height:46px;border-radius:15px;font-size:14px;padding:0 78px 0 18px;}
+  .grid{grid-template-columns:repeat(auto-fill,minmax(166px,1fr));gap:14px;}
+  .card{border-radius:16px;padding:10px;background:rgba(255,255,255,.028);}
+  .card .cov{border-radius:12px;}
+  .pl{left:10px;right:10px;bottom:10px;height:78px;border-radius:18px;padding:0 16px;background:linear-gradient(180deg,rgba(22,22,22,.92),rgba(10,10,10,.92));border:1px solid rgba(255,255,255,.08);backdrop-filter:blur(28px) saturate(140%);}
+  .pl .pp{width:44px;height:44px;}
+  .ctx .cb{padding:6px;}
+  .glass:hover{box-shadow:var(--sonora-shadow);}
+}
+@media(min-width:761px) and (max-width:1180px){
+  .app{grid-template-columns:200px minmax(0,1fr);grid-template-areas:"top top" "side main";padding:10px 10px 96px;}
+  .ctx{position:fixed;right:10px;top:88px;bottom:94px;width:min(360px,calc(100% - 20px));border-radius:20px;box-shadow:var(--sonora-shadow);}
+}
+/* ---------- Desktop popup / modal polish ---------- */
+@media(min-width:761px){
+  .qd{width:350px;right:14px;top:84px;bottom:100px;border-radius:20px;background:rgba(15,15,15,.94);border:1px solid var(--sonora-line);box-shadow:var(--sonora-shadow);backdrop-filter:blur(28px);}
+  .menu{min-width:220px;border:1px solid var(--sonora-line);background:rgba(18,18,18,.97);box-shadow:var(--sonora-shadow);backdrop-filter:blur(24px);border-radius:14px;}
+  .fp{padding:24px;background:linear-gradient(180deg,rgba(8,8,8,.98),rgba(5,5,5,.98));}
+  .fm{max-width:1160px;gap:64px;}
+  .fcv{max-width:500px;border-radius:26px;}
+}
+/* ---------- Mobile ---------- */
+@media(max-width:760px){
+  html,body{width:100%;height:100%;overflow:hidden;}
+  body{font-size:13px;background:var(--bg);}
+  body::before{inset:-35%;opacity:.6;}
+  body::after{opacity:.018;}
+  .app,.app.nocx{
+    height:100dvh;
+    display:grid;
+    grid-template-columns:1fr;
+    grid-template-rows:auto minmax(0,1fr);
+    grid-template-areas:"top" "main";
+    gap:0;
+    padding:8px 10px calc(142px + env(safe-area-inset-bottom,0px));
+  }
+  .top{
+    grid-area:top;
+    display:grid!important;
+    grid-template-columns:minmax(0,1fr) auto;
+    grid-template-rows:auto auto;
+    gap:10px;
+    min-height:0;
+    padding:8px 4px 10px;
+    border:0;
+    border-radius:0;
+    background:transparent;
+    box-shadow:none;
+    overflow:visible;
+  }
+  .top .logo{font-size:24px;padding:0 2px;display:flex;align-items:center;}
+  .top .logo svg{width:24px;height:20px;margin-right:7px!important;}
+  .sbox{grid-column:1/-1;grid-row:2;max-width:none;width:100%;}
+  .sbox .in{height:44px;margin:0;border-radius:15px;padding:0 48px 0 16px;font-size:13px;background:var(--ho);border:1px solid var(--bd);box-shadow:inset 0 1px 0 rgba(255,255,255,.04);}
+  .sbox kbd{display:none;}
+  .tq{gap:5px;}
+  .tq .btn,.tq .ic[data-a="queue"],.tq .ic[data-a="cx"],.tq .ic[data-a="ntf"]{display:none!important;}
+  .tq .av{width:38px;height:38px;}
+  .main{
+    grid-area:main;
+    padding:6px 2px 20px;
+    border:0;
+    border-radius:0;
+    background:transparent;
+    box-shadow:none;
+    overflow:auto!important;
+    -webkit-overflow-scrolling:touch;
+    overscroll-behavior:contain;
+  }
+  .side{display:none!important;}
+  .ctx{
+    position:fixed!important;
+    left:10px!important;right:10px!important;
+    top:auto!important;
+    bottom:calc(130px + env(safe-area-inset-bottom,0px))!important;
+    width:auto!important;
+    height:min(72dvh,560px)!important;
+    max-height:calc(100dvh - 160px)!important;
+    padding:10px!important;
+    border-radius:24px!important;
+    background:rgba(16,16,16,.96)!important;
+    border:1px solid rgba(255,255,255,.10)!important;
+    box-shadow:0 28px 80px rgba(0,0,0,.54)!important;
+    backdrop-filter:blur(28px) saturate(145%);
+    transform:translateY(120%)!important;
+    opacity:0!important;
+    pointer-events:none!important;
+    transition:transform .42s cubic-bezier(.22,1,.36,1),opacity .25s ease!important;
+    z-index:80!important;
+  }
+  .ctx.open{transform:translateY(0)!important;opacity:1!important;pointer-events:auto!important;}
+  .ctx::before{content:"";display:block;width:42px;height:4px;border-radius:99px;background:rgba(255,255,255,.24);margin:3px auto 9px;}
+  .ctx .ct{margin-bottom:8px;}
+  .ctx .tb{padding:9px 7px;min-height:34px;}
+  .ctx .cb{padding:3px;}
+  .pl{
+    left:10px!important;right:10px!important;
+    bottom:calc(70px + env(safe-area-inset-bottom,0px))!important;
+    height:58px!important;min-height:58px!important;
+    border-radius:17px!important;
+    padding:6px 9px!important;
+    display:grid!important;
+    grid-template-columns:minmax(0,1fr) auto!important;
+    gap:6px!important;
+    background:rgba(12,12,12,.95)!important;
+    border:1px solid rgba(255,255,255,.09)!important;
+    box-shadow:0 12px 40px rgba(0,0,0,.38)!important;
+    backdrop-filter:blur(26px) saturate(140%);
+    z-index:70!important;
+  }
+  .pl .inf{gap:8px;min-width:0;}
+  .pl .inf .cov{width:44px;height:44px;border-radius:11px;}
+  .pl .ctr{min-width:0;display:flex;align-items:center;justify-content:flex-end;}
+  .pl .btns{gap:1px;}
+  .pl .btns [data-a="shuf"],.pl .btns [data-a="prev"],.pl .btns [data-a="rep"]{display:none!important;}
+  .pl .pp{width:40px;height:40px;}
+  .pl .rg,.pl .wv{display:none!important;}
+  .pl .ctr .wv{display:none!important;}
+  .toast{top:calc(10px + env(safe-area-inset-top,0px));max-width:calc(100% - 28px);}
+  /* compact content */
+  h1{font-size:34px;line-height:1.02;letter-spacing:-.04em;margin-bottom:4px;}
+  h2{font-size:17px;margin:19px 0 9px;}
+  .hero{display:block!important;padding:2px 1px 4px;}
+  .hero .hx{font-size:42px!important;}
+  .hero p{font-size:12px;}
+  .grid{grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:9px!important;}
+  .card{padding:8px!important;border-radius:16px!important;background:rgba(255,255,255,.035)!important;}
+  .card .cov{border-radius:12px!important;margin-bottom:7px!important;}
+  .card b{font-size:13px;}
+  .card span{font-size:11px;}
+  .row{min-height:54px;padding:7px 6px!important;border-radius:13px;}
+  .row .cov{width:44px;height:44px;border-radius:11px;}
+  .du{font-size:11px;}
+  .chip{padding:8px 12px;min-height:36px;}
+  .btn{min-height:40px;padding:9px 14px;}
+  .ic{width:40px;height:40px;}
+  input[type=range]{width:76px;}
+  /* reference-like sections */
+  .top+.side+main .hero{margin-bottom:2px;}
+  .top+.side+main .grid{margin-top:2px;}
+  /* Full player becomes a true mobile sheet */
+  .fp{padding:12px 14px calc(18px + env(safe-area-inset-bottom,0px))!important;background:linear-gradient(180deg,#090909,#050505)!important;}
+  .fp .fx{padding:2px 0 0;}
+  .fp .fm{display:flex!important;flex-direction:column;justify-content:center;gap:14px;max-width:none;width:100%;padding:12px 0 8px;}
+  .fp .fcv{width:min(76vw,310px)!important;max-width:none!important;margin:0 auto;border-radius:24px!important;box-shadow:0 28px 70px rgba(0,0,0,.5)!important;}
+  .fp .fi{width:100%;text-align:left;}
+  .fp .fi h1{font-size:29px;margin-top:2px;}
+  .fp .fi p{font-size:13px!important;}
+  .fp .fi .btns{justify-content:space-between;margin-top:10px;}
+  .fp .fi .pp{width:56px;height:56px;font-size:19px;}
+  .fp .fi .ic{width:44px;height:44px;}
+  /* Other popups */
+  .qd{left:10px!important;right:10px!important;top:auto!important;bottom:calc(130px + env(safe-area-inset-bottom,0px))!important;width:auto!important;max-width:none!important;height:min(68dvh,520px)!important;max-height:calc(100dvh - 150px)!important;padding:10px!important;border-radius:24px!important;background:rgba(16,16,16,.97)!important;border:1px solid rgba(255,255,255,.10)!important;box-shadow:0 28px 80px rgba(0,0,0,.54)!important;backdrop-filter:blur(28px);transform:translateY(120%)!important;opacity:0;transition:transform .42s cubic-bezier(.22,1,.36,1),opacity .25s ease!important;z-index:82!important;}
+  .qd.open{transform:translateY(0)!important;opacity:1;}
+  .qd::before{content:"";display:block;width:42px;height:4px;border-radius:99px;background:rgba(255,255,255,.24);margin:3px auto 9px;}
+  .menu{min-width:0;width:min(280px,calc(100vw - 28px));max-width:calc(100vw - 28px);border:1px solid rgba(255,255,255,.10);background:rgba(18,18,18,.98);box-shadow:0 22px 70px rgba(0,0,0,.5);backdrop-filter:blur(22px);border-radius:18px;padding:7px;}
+  .menu button{min-height:44px;padding:10px 12px;border-radius:12px;}
+  /* Auth */
+  .auth{padding:12px!important;align-items:flex-end!important;}
+  .auth-card{width:100%;padding:26px 20px 20px;border-radius:26px!important;margin:0!important;max-height:92dvh;overflow:auto;}
+  .auth-title{font-size:28px;}
+}
+@media(max-width:380px){
+  .top .logo{font-size:21px;}
+  .sbox .in{height:42px;font-size:12px;}
+  .grid{gap:7px!important;}
+  .card{padding:7px!important;}
+  .card b{font-size:12px;}
+  .pl{left:7px!important;right:7px!important;}
+  .app,.app.nocx{padding-left:8px;padding-right:8px;}
+}
+/* mobile dock generated by JS */
+#mobileQuickNav{display:none;}
+@media(max-width:760px){
+  #mobileQuickNav{
+    position:fixed;display:grid;grid-template-columns:repeat(5,1fr);gap:2px;
+    left:10px;right:10px;bottom:calc(8px + env(safe-area-inset-bottom,0px));
+    height:58px;padding:5px;border-radius:20px;z-index:75;
+    background:rgba(14,14,14,.95);border:1px solid rgba(255,255,255,.09);
+    box-shadow:0 14px 44px rgba(0,0,0,.42);backdrop-filter:blur(28px) saturate(145%);
+  }
+  #mobileQuickNav button{border:0;background:transparent;color:var(--mut);border-radius:15px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;font:600 10px Inter,sans-serif;min-width:0;touch-action:manipulation;}
+  #mobileQuickNav button .mq-icon{font-size:17px;line-height:1;}
+  #mobileQuickNav button.on{color:var(--fg);background:rgba(255,255,255,.09);}
+  #mobileQuickNav button.more{color:var(--fg);}
+  #mobileQuickNav button:active{transform:scale(.95);}
+  #mobileMoreSheet{position:fixed;left:10px;right:10px;bottom:calc(74px + env(safe-area-inset-bottom,0px));height:min(72dvh,560px);max-height:calc(100dvh - 110px);padding:10px;border-radius:24px;background:rgba(16,16,16,.97);border:1px solid rgba(255,255,255,.10);box-shadow:0 28px 80px rgba(0,0,0,.58);backdrop-filter:blur(28px);z-index:88;transform:translateY(120%);opacity:0;pointer-events:none;transition:transform .42s cubic-bezier(.22,1,.36,1),opacity .25s ease;overflow:auto;}
+  #mobileMoreSheet.open{transform:none;opacity:1;pointer-events:auto;}
+  #mobileMoreSheet::before{content:"";display:block;width:42px;height:4px;border-radius:99px;background:rgba(255,255,255,.24);margin:3px auto 10px;}
+  #mobileMoreSheet .mms-title{font:800 21px Manrope,Inter,sans-serif;padding:5px 6px 11px;}
+  #mobileMoreSheet .mms-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;}
+  #mobileMoreSheet button{min-height:50px;text-align:left;padding:10px 12px;border-radius:14px;background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.06);color:var(--fg);font:600 12px Inter,sans-serif;}
+  #mobileMoreSheet button:hover{background:rgba(255,255,255,.08);}
+  #mobileMoreBackdrop{position:fixed;inset:0;background:rgba(0,0,0,.42);backdrop-filter:blur(3px);z-index:87;display:none;}
+  #mobileMoreBackdrop.open{display:block;}
+}
+@media(min-width:761px){#mobileQuickNav,#mobileMoreSheet,#mobileMoreBackdrop{display:none!important;}}
+</style>
+</head><body class="pz noauth"><div id="bgLayer"></div><div id="amb"></div>
 <div class="auth" id="authScreen"><button class="auth-back" id="authBack" style="display:none">← Back</button><button class="auth-skip" id="authSkip" style="display:none">Skip</button><div class="auth-card glass" id="authCard"></div></div>
 <div class="app"><header class="top glass"><div class="logo"><svg width="22" height="18" viewBox="0 0 22 18" fill="currentColor" aria-hidden="true" style="margin-right:8px;vertical-align:-1px"><rect x="0" y="6" width="2.4" height="6" rx="1.2"/><rect x="4.9" y="2" width="2.4" height="14" rx="1.2"/><rect x="9.8" y="0" width="2.4" height="18" rx="1.2"/><rect x="14.7" y="4" width="2.4" height="10" rx="1.2"/><rect x="19.6" y="7" width="2.4" height="4" rx="1.2"/></svg>SONORA</div><div class="sbox"><input class="in" id="q" placeholder="Search songs, creators, albums, playlists..." aria-label="Search" autocomplete="off"><kbd id="kb">Ctrl K</kbd></div><div class="tq"><button class="btn g" data-a="nav" data-v="up">Import</button><button class="btn g" data-a="nav" data-v="mst">Master</button><button class="btn" data-a="cre">＋ Create</button><button class="ic" data-a="queue" aria-label="Queue">☰</button><button class="ic" data-a="ntf" aria-label="Notifications"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0112 0c0 7 3 9 3 9H3s3-2 3-9M10 21a2 2 0 004 0"/></svg></button><button class="ic" data-a="cx" aria-label="Toggle side panel"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M15 4v16"/></svg></button><button class="av" data-a="prf" aria-label="Profile">Y</button></div></header><nav class="side glass" aria-label="Main"><div class="sc">Main</div><button class="nv" data-a="nav" data-v="home">Home</button><button class="nv" data-a="nav" data-v="disc">Discover</button><button class="nv" data-a="nav" data-v="search">Search</button><button class="nv" data-a="nav" data-v="lib">Library</button><button class="nv" data-a="nav" data-v="liked">Liked songs</button><button class="nv" data-a="nav" data-v="rec">Recently played</button><button class="nv" data-a="nav" data-v="now">Now playing</button><div class="sc">Your music</div><button class="nv" data-a="nav" data-v="imp">Imported</button><div class="sc">Collections</div><button class="nv" data-a="nav" data-v="artists">Creators</button><div class="sc">Creator</div><button class="nv" data-a="nav" data-v="up">Import</button><button class="nv" data-a="nav" data-v="mst">Master</button><button class="nv" data-a="nav" data-v="feed">Feed</button><button class="nv" data-a="nav" data-v="events">Events</button><div class="sc">System</div><button class="nv" data-a="nav" data-v="set">Settings</button><div class="sp"></div><button class="nv hide" data-a="theme" id="th">Theme: system</button></nav><main class="main glass" id="main"></main><aside class="ctx glass" id="ctx" aria-label="Context panel"><div class="ct" id="ct" role="tablist"></div><div class="cb" id="cb"></div></aside></div>
 <div class="pl glass"><div class="inf" id="inf"></div><div class="ctr"><div class="btns"><button class="ic" data-a="shuf" id="bs" aria-label="Shuffle">⇄</button><button class="ic" data-a="prev" aria-label="Previous">⏮&#xFE0E;</button><button class="pp" data-a="pp" id="pp" aria-label="Play or pause">▶&#xFE0E;</button><button class="ic" data-a="next" aria-label="Next">⏭&#xFE0E;</button><button class="ic" data-a="rep" id="br" aria-label="Repeat">↻</button></div><div class="wv"><span id="tc">0:00</span><canvas id="cv" aria-label="Seek"></canvas><div id="waveComments" class="wave-comments" aria-hidden="false"></div><span id="td">0:00</span></div></div><div class="rg"><button class="ic" data-a="mute" id="bm" aria-label="Mute">🔈&#xFE0E;</button><input type="range" id="vol" min="0" max="100" aria-label="Volume"><button class="ic" data-a="queue" aria-label="Queue">☰</button></div></div>
@@ -1390,6 +1618,70 @@ afterAuth=async function(){await __afterAuthBeforeProfiles();await refreshOwnPro
   setVh();
   addEventListener('resize',setVh,{passive:true});
   addEventListener('orientationchange',()=>setTimeout(setVh,150),{passive:true});
+})();
+</script>
+
+<script id="sonora-full-responsive-js">
+(function(){
+  const qs=(s,r=document)=>r.querySelector(s);
+  const qsa=(s,r=document)=>Array.from(r.querySelectorAll(s));
+  function makeMobileNav(){
+    if(document.getElementById('mobileQuickNav')) return;
+    const side=document.querySelector('.side');
+    if(!side) return;
+    const dock=document.createElement('nav');
+    dock.id='mobileQuickNav'; dock.setAttribute('aria-label','Mobile navigation');
+    const items=[
+      ['home','⌂','Home'],
+      ['disc','✦','Discover'],
+      ['lib','▤','Library'],
+      ['liked','♡','Liked'],
+      ['more','☰','More']
+    ];
+    dock.innerHTML=items.map(([v,ic,label])=>`<button class="${v==='more'?'more':''}" data-mq="${v}" aria-label="${label}"><span class="mq-icon">${ic}</span><span>${label}</span></button>`).join('');
+    document.body.appendChild(dock);
+
+    const backdrop=document.createElement('div'); backdrop.id='mobileMoreBackdrop'; document.body.appendChild(backdrop);
+    const sheet=document.createElement('section'); sheet.id='mobileMoreSheet'; sheet.setAttribute('aria-label','More navigation');
+    const navs=qsa('.side .nv');
+    const labels=navs.map(b=>({v:b.dataset.v||'',label:(b.textContent||'').trim()})).filter(x=>x.v && !['home','disc','lib','liked'].includes(x.v));
+    sheet.innerHTML='<div class="mms-title">SONORA</div><div class="mms-grid">'+labels.map(x=>`<button data-a="nav" data-v="${x.v}">${x.label||x.v}</button>`).join('')+'</div>';
+    const profile=document.createElement('button'); profile.setAttribute('data-a','prf'); profile.textContent='Profile'; sheet.querySelector('.mms-grid').appendChild(profile);
+    document.body.appendChild(sheet);
+
+    function openMore(){sheet.classList.add('open');backdrop.classList.add('open');}
+    function closeMore(){sheet.classList.remove('open');backdrop.classList.remove('open');}
+    dock.addEventListener('click',e=>{
+      const b=e.target.closest('button'); if(!b) return;
+      const v=b.dataset.mq;
+      if(v==='more'){openMore();return;}
+      const target=qs(`.side .nv[data-v="${v}"]`);
+      if(target) target.click();
+      qsa('#mobileQuickNav button').forEach(x=>x.classList.toggle('on',x===b));
+      closeMore();
+    });
+    backdrop.addEventListener('click',closeMore);
+    sheet.addEventListener('click',e=>{
+      const b=e.target.closest('[data-a]'); if(b) setTimeout(closeMore,80);
+    });
+    document.addEventListener('keydown',e=>{if(e.key==='Escape')closeMore();});
+
+    // Keep quick-nav highlight in sync with the existing desktop nav.
+    const sync=()=>{
+      const on=qs('.side .nv.on');
+      const v=on?.dataset?.v;
+      qsa('#mobileQuickNav button[data-mq]').forEach(b=>b.classList.toggle('on',b.dataset.mq===v));
+    };
+    const observer=new MutationObserver(sync);
+    qsa('.side .nv').forEach(n=>observer.observe(n,{attributes:true,attributeFilter:['class']}));
+    sync();
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',makeMobileNav); else makeMobileNav();
+
+  // Improve touch behavior on sliders/canvases without changing existing logic.
+  document.addEventListener('touchstart',e=>{
+    if(e.target.closest('canvas,input[type=range],button,.nv,.row,.card,.menu')) return;
+  },{passive:true});
 })();
 </script>
 </body></html>
