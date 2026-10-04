@@ -765,17 +765,24 @@ class H(BaseHTTPRequestHandler):
 
     def get_profile(self, key):
         viewer=get_user_from_handler(self)
+        raw=urllib.parse.unquote(str(key or '')).strip()
+        if raw.lower().startswith('u:'): raw=raw[2:]
+        if raw.startswith('@'): raw=raw[1:]
         with DB_LOCK:
             c=db()
-            if str(key).isdigit(): row=c.execute('SELECT * FROM users WHERE id=?',(int(key),)).fetchone()
-            else: row=c.execute('SELECT * FROM users WHERE username=?',(str(key).lower(),)).fetchone()
+            if raw.isdigit():
+                row=c.execute('SELECT * FROM users WHERE id=?',(int(raw),)).fetchone()
+            else:
+                row=c.execute('SELECT * FROM users WHERE lower(username)=lower(?)',(raw,)).fetchone()
             if not row:
                 c.close(); return self.json(404,{'error':'Profile not found'})
             uid=row['id']; is_owner=bool(viewer and int(viewer['id'])==int(uid))
-            track_clause='t.user_id=?' if is_owner else 't.user_id=? AND t.visibility IN ("Public","Unlisted")'
-            tracks=c.execute(TRACK_SELECT+f' WHERE {track_clause} ORDER BY t.created_at DESC LIMIT 200',(uid,)).fetchall()
-            pl_clause='p.user_id=?' if is_owner else 'p.user_id=? AND p.visibility IN ("Public","Unlisted")'
-            pls=c.execute(f'SELECT p.* FROM playlists p WHERE {pl_clause} ORDER BY p.updated_at DESC LIMIT 200',(uid,)).fetchall()
+            visible_tracks='t.user_id=?' if is_owner else 't.user_id=? AND t.visibility IN ("Public","Unlisted")'
+            visible_playlists='p.user_id=?' if is_owner else 'p.user_id=? AND p.visibility IN ("Public","Unlisted")'
+            tracks=c.execute(TRACK_SELECT+f' WHERE {visible_tracks} ORDER BY t.created_at DESC LIMIT 200',(uid,)).fetchall()
+            pls=c.execute(f'SELECT p.* FROM playlists p WHERE {visible_playlists} ORDER BY p.updated_at DESC LIMIT 200',(uid,)).fetchall()
+            track_count=c.execute(f'SELECT COUNT(*) n FROM tracks t WHERE {visible_tracks}',(uid,)).fetchone()['n']
+            playlist_count=c.execute(f'SELECT COUNT(*) n FROM playlists p WHERE {visible_playlists}',(uid,)).fetchone()['n']
             followers=c.execute('SELECT COUNT(*) n FROM follows WHERE following_id=?',(uid,)).fetchone()['n']
             following=c.execute('SELECT COUNT(*) n FROM follows WHERE follower_id=?',(uid,)).fetchone()['n']
             follows_me=bool(viewer and c.execute('SELECT 1 FROM follows WHERE follower_id=? AND following_id=?',(viewer['id'],uid)).fetchone())
@@ -783,7 +790,7 @@ class H(BaseHTTPRequestHandler):
             data={
                 'user':public_user(row, include_email=is_owner),
                 'viewerIsOwner':is_owner, 'following':follows_me,
-                'followers':followers, 'followingCount':following, 'trackCount':len(tracks), 'playlistCount':len(pls), 'playCount':total_plays,
+                'followers':followers, 'followingCount':following, 'trackCount':track_count, 'playlistCount':playlist_count, 'playCount':total_plays,
                 'tracks':[track_json(x,'') for x in tracks],
                 'playlists':[playlist_json(c,x,'',viewer['id'] if viewer else 0) for x in pls]
             }
@@ -867,8 +874,16 @@ class H(BaseHTTPRequestHandler):
             ext={'image/jpeg':'.jpg','image/png':'.png','image/webp':'.webp','image/gif':'.gif'}.get((cf['content_type'] or '').split(';')[0].strip().lower())
             if ext:
                 cover_name=f'cov_{secrets.token_hex(8)}{ext}'; (UPLOAD_DIR/cover_name).write_bytes(cf['data'])
-        with DB_LOCK:
-            c=db(); cur=c.execute('INSERT INTO tracks(user_id,title,artist,album,genre,tags,visibility,explicit,filename,mime,size_bytes,duration,peaks,cover,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(u['id'],title,artist,album,genre,tags,vis,explicit,unique,f['content_type'],len(f['data']),dur,json.dumps(pk),cover_name,now_iso())); tid=cur.lastrowid; c.commit(); row=c.execute(TRACK_SELECT+' WHERE t.id=?',(tid,)).fetchone(); c.close()
+        try:
+            with DB_LOCK:
+                c=db(); cur=c.execute('INSERT INTO tracks(user_id,title,artist,album,genre,tags,visibility,explicit,filename,mime,size_bytes,duration,peaks,cover,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(u['id'],title,artist,album,genre,tags,vis,explicit,unique,f['content_type'],len(f['data']),dur,json.dumps(pk),cover_name,now_iso())); tid=cur.lastrowid; c.commit(); row=c.execute(TRACK_SELECT+' WHERE t.id=?',(tid,)).fetchone(); c.close()
+        except Exception:
+            try: path.unlink()
+            except OSError: pass
+            if cover_name:
+                try: (UPLOAD_DIR/cover_name).unlink()
+                except OSError: pass
+            raise
         bump()
         return self.json(201,{'track':track_json(row,'')})
 
