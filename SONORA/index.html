@@ -499,7 +499,7 @@ case'theme':theme={system:'light',light:'dark',dark:'system'}[theme];SV('theme',
 case'newpl':{const n=$('#pn').value.trim();if(!n){toast('Enter a name for the playlist');break}const p={id:'p'+Date.now(),name:n,t:[]};pls.push(p);savePl();toast('Playlist created');act('Created playlist '+n);view='pl';arg=p.id;render(1)}break;
 case'opencpl':view='pl';arg='c'+d.id;render(1);break;case'openpl':view='pl';arg=d.id;render(1);break;case'cpl':{const p=communityPlaylists.find(x=>String(x.id)===String(d.id));if(!p||!p.trackIds?.length){toast('Playlist is empty');break}const ids=p.trackIds.map(id=>'s'+id).filter(id=>B[id]);ids.length?playList(ids,ids[0]):toast('Playlist tracks are not available');break;}case'plplay':{const p=plOf(arg);p&&p.t.length?playList(p.t,p.t[0]):toast('Add songs first')}break;
 case'delpl':{const dp=pls.find(x=>x.id===arg);if(dp&&dp.serverId&&backendReady())apiFetch('/api/playlists/'+dp.serverId,{method:'DELETE'}).catch(()=>{});pls=pls.filter(x=>x.id!==arg);savePl();toast('Playlist deleted');view='lib';render(1);break}
-case'goart':{const hit=T.find(t=>t.owner&&(t.owner.name===d.n||t.owner.username===d.n||String(t.owner.id)===String(d.n)));if(hit?.owner){view='profile';arg='u:'+(hit.owner.username||hit.owner.id)}else if(API.user&&(API.user.name===d.n||API.user.username===d.n)){view='profile';arg='u:'+(API.user.username||API.user.id)}else{toast('Creator profile not available');return}render(1);break;}case'fol':fol=fol.includes(d.n)?fol.filter(x=>x!==d.n):[...fol,d.n];SV('fol',fol);if(fol.includes(d.n))act('Followed '+d.n);toast(fol.includes(d.n)?'Followed':'Unfollowed');render();break;case'artplay':VL.length&&playList(VL,VL[0]);break;
+case'goart':{const name=String(d.n||'').trim();const hit=T.find(t=>t.owner&&(String(t.owner.name||'').toLowerCase()===name.toLowerCase()||String(t.owner.username||'').toLowerCase()===name.toLowerCase()||String(t.owner.id)===name));if(hit?.owner){view='profile';arg='u:'+(hit.owner.username||hit.owner.id)}else if(API.user&&(String(API.user.name||'').toLowerCase()===name.toLowerCase()||String(API.user.username||'').toLowerCase()===name.toLowerCase()||String(API.user.id)===name)){view='profile';arg='u:'+(API.user.username||API.user.id)}else{view='profile';arg='u:'+name}render(1);break;}case'fol':fol=fol.includes(d.n)?fol.filter(x=>x!==d.n):[...fol,d.n];SV('fol',fol);if(fol.includes(d.n))act('Followed '+d.n);toast(fol.includes(d.n)?'Followed':'Unfollowed');render();break;case'artplay':VL.length&&playList(VL,VL[0]);break;
 case'cmt':{const pi=a.previousElementSibling,inp=(pi&&pi.tagName==='INPUT')?pi:($('#socIn')||$('#ci')),v=(inp&&inp.value||'').trim();if(!cur||!v){toast('Write a comment first');break}
 if(cur.serverId){if(!backendReady()){toast('Sign in to comment — everyone will see it');break}
 apiPostComment(cur,v,Math.floor(au.currentTime)).then(()=>{inp.value='';toast('Comment posted');act('Commented on '+cur.title);draw()}).catch(e=>toast(e.message||'Could not post comment'))}
@@ -747,16 +747,31 @@ function profileFallback(){
   return {user:{id:u.id,name:u.name||u.username||'You',username:u.username||'you',avatarUrl:u.avatarUrl||'',backgroundUrl:u.backgroundUrl||'',bio:u.bio||'',createdAt:u.createdAt||''},viewerIsOwner:true,following:false,followers:0,followingCount:0,trackCount:0,playlistCount:0,playCount:0,tracks:T.filter(x=>x.mine&&x.serverId),playlists:[]};
 }
 async function fetchProfile(key){
-  const raw=decodeURIComponent(String(key||API.user?.username||API.user?.id||'').trim()).replace(/^u:/i,'').replace(/^@/,'').trim();
-  const cacheKey=raw||'me';
+  const requested=decodeURIComponent(String(key||'').trim()).replace(/^u:/i,'').replace(/^@/,'').trim();
+  const self=API.user||{};
+  const own=!requested || requested.toLowerCase()==='me' || String(self.id||'')===requested || String(self.username||'').toLowerCase()===requested.toLowerCase();
+  const raw=own?(self.username||self.id||'me'):requested;
+  const cacheKey=own?'me':raw;
   const hit=PROFILE_CACHE[cacheKey];if(hit&&Date.now()-(hit._at||0)<8000)return hit;
-  if(!raw)throw new Error('Profile key is missing');
   if(!API.online)throw new Error('SONORA server is offline — cannot load another profile.');
-  const candidates=[raw];
-  if(/^\d+$/.test(raw)&&API.user?.username)candidates.push(String(API.user.username));
-  if(API.user?.id&&raw.toLowerCase()===String(API.user.username||'').toLowerCase())candidates.push(String(API.user.id));
+  const candidates=[];
+  if(own)candidates.push('me',String(self.username||''),String(self.id||''));
+  else {
+    candidates.push(raw);
+    if(/^\d+$/.test(raw))candidates.push(String(self.username||''));
+  }
+  // One more authoritative lookup in case local cached account data is stale.
+  if(own || !self.id){try{const me=await apiFetch('/api/me');if(me?.user){API.user=me.user;cacheAuth(me.user);candidates.unshift(own?'me':String(me.user.username||''));if(!own&&String(me.user.username||'').toLowerCase()===raw.toLowerCase())candidates.push(String(me.user.id));}}catch(_){}}
   const seen=new Set();let last;
-  for(const c of candidates){if(seen.has(String(c)))continue;seen.add(String(c));try{const r=await apiFetch('/api/users/'+encodeURIComponent(c));if(r?.profile){r.profile._at=Date.now();PROFILE_CACHE[cacheKey]=r.profile;return r.profile}}catch(err){last=err;}}
+  for(const c0 of candidates){const c=String(c0||'').trim();if(!c||seen.has(c.toLowerCase()))continue;seen.add(c.toLowerCase());
+    const urls=[('/api/profile?key='+encodeURIComponent(c)),('/api/users/'+encodeURIComponent(c))];
+    for(const url of urls){try{const r=await apiFetch(url);if(r?.profile){r.profile._at=Date.now();PROFILE_CACHE[cacheKey]=r.profile;return r.profile}}catch(err){last=err;}}
+  }
+  // Search is the final recovery path for a username that was renamed or cached incorrectly.
+  try{const q=raw||self.username||self.name||'';if(q){const r=await apiFetch('/api/search?q='+encodeURIComponent(q)+'&limit=20');const users=r?.users||[];const hit=users.find(u=>String(u.id)===String(raw)||String(u.username||'').toLowerCase()===String(raw).toLowerCase()||String(u.name||'').toLowerCase()===String(raw).toLowerCase());if(hit){const r2=await apiFetch('/api/profile?key='+encodeURIComponent(hit.id));if(r2?.profile){r2.profile._at=Date.now();PROFILE_CACHE[cacheKey]=r2.profile;return r2.profile}}}}catch(err){last=err}
+  if(own&&self.id){
+    const fallback=profileFallback();fallback.user={...fallback.user,...self};fallback._at=Date.now();PROFILE_CACHE[cacheKey]=fallback;return fallback;
+  }
   throw last||new Error('Profile not found');
 }
 const authorAvatar=u=>u?.avatarUrl?`background:url(${u.avatarUrl}) center/cover`:`background:linear-gradient(145deg,var(--bf),var(--mut))`;
