@@ -150,11 +150,13 @@ def init_db():
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           track_id INTEGER NOT NULL,
           user_id INTEGER NOT NULL,
+          parent_id INTEGER DEFAULT NULL,
           text TEXT NOT NULL,
           position REAL NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL,
           FOREIGN KEY(track_id) REFERENCES tracks(id) ON DELETE CASCADE,
-          FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+          FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY(parent_id) REFERENCES comments(id) ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS messages(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -205,6 +207,11 @@ def init_db():
                 c.execute('ALTER TABLE tracks ADD COLUMN ' + col)
             except sqlite3.OperationalError:
                 pass
+        try:
+            c.execute('ALTER TABLE comments ADD COLUMN parent_id INTEGER DEFAULT NULL')
+        except sqlite3.OperationalError:
+            pass
+        c.execute('CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(track_id, parent_id, created_at)')
         c.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub)')
         # Canonical author identity: every track/playlist uses its real owner profile.
         c.execute('UPDATE tracks SET artist=(SELECT name FROM users WHERE users.id=tracks.user_id) WHERE EXISTS (SELECT 1 FROM users WHERE users.id=tracks.user_id)')
@@ -633,6 +640,8 @@ class H(BaseHTTPRequestHandler):
         if m and method=='DELETE': return self.delete_track(int(m.group(1)))
         if path=='/api/playlists' and method=='GET': return self.get_playlists()
         if path=='/api/playlists' and method=='POST': return self.create_playlist()
+        m=re.match(r'^/api/playlists/(\d+)$',path)
+        if m and method=='GET': return self.get_playlist(int(m.group(1)))
         if path=='/api/search' and method=='GET': return self.search(q)
         m=re.match(r'^/api/users/([^/]+)$',path)
         if m and method=='GET': return self.get_profile(m.group(1))
@@ -978,24 +987,37 @@ class H(BaseHTTPRequestHandler):
         u=get_user_from_handler(self)
         with DB_LOCK:
             c=db(); r=self.can_view_track(c,tid,u)
-            if not r: c.close(); return self.json(404,{'error':'Track not found'})
-            rows=c.execute('SELECT cm.*,u.name,u.username FROM comments cm JOIN users u ON u.id=cm.user_id WHERE cm.track_id=? ORDER BY cm.created_at',(tid,)).fetchall(); c.close()
-        return self.json(200,{'comments':[{'id':x['id'],'text':x['text'],'position':x['position'],'createdAt':x['created_at'],'user':{'id':x['user_id'],'name':x['name'],'username':x['username']}} for x in rows]})
+            if not r:
+                c.close(); return self.json(404,{'error':'Track not found'})
+            rows=c.execute("SELECT cm.*,u.name,u.username,u.avatar_url FROM comments cm JOIN users u ON u.id=cm.user_id WHERE cm.track_id=? ORDER BY cm.created_at",(tid,)).fetchall(); c.close()
+        return self.json(200,{'comments':[{'id':x['id'],'text':x['text'],'parentId':x['parent_id'],'position':x['position'],'createdAt':x['created_at'],'user':{'id':x['user_id'],'name':x['name'],'username':x['username'],'avatarUrl':x['avatar_url'] or ''}} for x in rows]})
 
     def add_comment(self,tid):
         u=require_user(self)
         if not u:return
         d=self.parse_json(); text=str(d.get('text','')).strip(); position=float(d.get('position',0) or 0)
+        try: parent_id=int(d.get('parentId')) if d.get('parentId') not in (None,'','null') else None
+        except Exception: parent_id=None
         if not text:return self.json(400,{'error':'Comment cannot be empty'})
         with DB_LOCK:
             c=db(); tr=c.execute('SELECT user_id,title,visibility FROM tracks WHERE id=?',(tid,)).fetchone()
-            if not tr or (tr['visibility']=='Private' and tr['user_id']!=u['id']): c.close(); return self.json(404,{'error':'Track not found'})
-            c.execute('INSERT INTO comments(track_id,user_id,text,position,created_at) VALUES(?,?,?,?,?)',(tid,u['id'],text,position,now_iso()))
-            if tr['user_id']!=u['id']:
-                c.execute('INSERT INTO notifications(user_id,type,title,body,created_at) VALUES(?,?,?,?,?)',(tr['user_id'],'comment','New comment',f"{u['name']} commented on {tr['title']}",now_iso()))
+            if not tr or (tr['visibility']=='Private' and tr['user_id']!=u['id']):
+                c.close(); return self.json(404,{'error':'Track not found'})
+            par=None
+            if parent_id is not None:
+                par=c.execute('SELECT id,user_id,position FROM comments WHERE id=? AND track_id=?',(parent_id,tid)).fetchone()
+                if not par:
+                    c.close(); return self.json(400,{'error':'Parent comment not found'})
+                position=float(par['position'] or position)
+            cur=c.execute('INSERT INTO comments(track_id,user_id,parent_id,text,position,created_at) VALUES(?,?,?,?,?,?)',(tid,u['id'],parent_id,text,position,now_iso())); cid=cur.lastrowid
+            notify_uid=tr['user_id'] if parent_id is None else (par['user_id'] if par['user_id']!=u['id'] else tr['user_id'])
+            if notify_uid!=u['id']:
+                ntitle='New reply' if parent_id is not None else 'New comment'
+                body=(f"{u['name']} replied to your comment on {tr['title']}" if parent_id is not None else f"{u['name']} commented on {tr['title']}")
+                c.execute('INSERT INTO notifications(user_id,type,title,body,created_at) VALUES(?,?,?,?,?)',(notify_uid,'comment',ntitle,body,now_iso()))
             c.commit(); c.close()
         bump()
-        return self.json(201,{'ok':True})
+        return self.json(201,{'ok':True,'id':cid,'parentId':parent_id,'position':position})
 
     def playlist_vis(self, d, default):
         v = d.get('visibility')
@@ -1010,6 +1032,17 @@ class H(BaseHTTPRequestHandler):
         with DB_LOCK:
             c=db(); rows=c.execute(f'SELECT p.* FROM playlists p WHERE {clause} ORDER BY p.updated_at DESC LIMIT 200',args).fetchall(); data=[playlist_json(c,r,'',uid) for r in rows]; c.close()
         return self.json(200,{'playlists':data})
+
+    def get_playlist(self, pid):
+        u=get_user_from_handler(self); uid=u['id'] if u else 0
+        with DB_LOCK:
+            c=db(); r=c.execute('SELECT * FROM playlists WHERE id=?',(pid,)).fetchone()
+            if not r:
+                c.close(); return self.json(404,{'error':'Playlist not found'})
+            if r['visibility']!='Public' and (not u or r['user_id']!=u['id']):
+                c.close(); return self.json(404,{'error':'Playlist not found'})
+            data=playlist_json(c,r,'',uid); c.close()
+        return self.json(200,{'playlist':data})
 
     def set_playlist_tracks(self, c, pid, u, ids):
         c.execute('DELETE FROM playlist_tracks WHERE playlist_id=?',(pid,))
