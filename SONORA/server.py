@@ -146,6 +146,14 @@ def init_db():
           FOREIGN KEY(playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
           FOREIGN KEY(track_id) REFERENCES tracks(id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS saved_playlists(
+          user_id INTEGER NOT NULL,
+          playlist_id INTEGER NOT NULL,
+          saved_at TEXT NOT NULL,
+          PRIMARY KEY(user_id, playlist_id),
+          FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY(playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
+        );
         CREATE TABLE IF NOT EXISTS comments(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           track_id INTEGER NOT NULL,
@@ -309,11 +317,14 @@ def playlist_json(c, r, base='', viewer_id=0):
         "WHERE pt.playlist_id=? AND (t.visibility!='Private' OR t.user_id=?) ORDER BY pt.position",
         (r['id'], viewer_id)).fetchall()
     own = c.execute('SELECT id,name,username,avatar_url,background_url,bio FROM users WHERE id=?', (r['user_id'],)).fetchone()
+    saved = bool(viewer_id and c.execute('SELECT 1 FROM saved_playlists WHERE user_id=? AND playlist_id=?',(viewer_id,r['id'])).fetchone())
+    is_owner = bool(viewer_id and int(viewer_id)==int(r['user_id']))
     return {
       'id': r['id'], 'name': r['name'], 'artist': own['name'] if own else r['artist'], 'description': r['description'],
       'visibility': r['visibility'], 'public': r['visibility'] == 'Public', 'coverUrl': r['cover_url'],
       'backgroundUrl': r['background_url'], 'trackIds': [x['track_id'] for x in tr],
-      'createdAt': r['created_at'], 'updatedAt': r['updated_at'],
+      'createdAt': r['created_at'], 'updatedAt': r['updated_at'], 'saved': saved,
+      'canEdit': is_owner, 'canAdd': is_owner,
       'owner': {'id': own['id'], 'name': own['name'], 'username': own['username'],
                 'avatarUrl': own['avatar_url'] or '', 'backgroundUrl': own['background_url'] or '',
                 'bio': own['bio'] or ''} if own else None
@@ -640,6 +651,12 @@ class H(BaseHTTPRequestHandler):
         if m and method=='DELETE': return self.delete_track(int(m.group(1)))
         if path=='/api/playlists' and method=='GET': return self.get_playlists()
         if path=='/api/playlists' and method=='POST': return self.create_playlist()
+        m=re.match(r'^/api/playlists/(\d+)/tracks$',path)
+        if m and method=='POST': return self.add_playlist_track(int(m.group(1)))
+        if m and method=='DELETE': return self.remove_playlist_track(int(m.group(1)))
+        m=re.match(r'^/api/playlists/(\d+)/save$',path)
+        if m and method=='POST': return self.save_playlist(int(m.group(1)))
+        if m and method=='DELETE': return self.unsave_playlist(int(m.group(1)))
         m=re.match(r'^/api/playlists/(\d+)$',path)
         if m and method=='GET': return self.get_playlist(int(m.group(1)))
         if path=='/api/search' and method=='GET': return self.search(q)
@@ -1027,8 +1044,12 @@ class H(BaseHTTPRequestHandler):
         return v if v in ('Public','Unlisted','Private') else default
 
     def get_playlists(self):
-        u=get_user_from_handler(self); uid=u['id'] if u else 0; clause="p.visibility='Public'"; args=[]
-        if u: clause="(p.visibility='Public' OR p.user_id=?)"; args=[u['id']]
+        u=get_user_from_handler(self); uid=u['id'] if u else 0
+        if u:
+            clause="(p.visibility='Public' OR p.user_id=? OR EXISTS(SELECT 1 FROM saved_playlists sp WHERE sp.playlist_id=p.id AND sp.user_id=?))"
+            args=[u['id'],u['id']]
+        else:
+            clause="p.visibility='Public'"; args=[]
         with DB_LOCK:
             c=db(); rows=c.execute(f'SELECT p.* FROM playlists p WHERE {clause} ORDER BY p.updated_at DESC LIMIT 200',args).fetchall(); data=[playlist_json(c,r,'',uid) for r in rows]; c.close()
         return self.json(200,{'playlists':data})
@@ -1039,10 +1060,31 @@ class H(BaseHTTPRequestHandler):
             c=db(); r=c.execute('SELECT * FROM playlists WHERE id=?',(pid,)).fetchone()
             if not r:
                 c.close(); return self.json(404,{'error':'Playlist not found'})
-            if r['visibility']!='Public' and (not u or r['user_id']!=u['id']):
+            saved = bool(u and c.execute('SELECT 1 FROM saved_playlists WHERE user_id=? AND playlist_id=?',(u['id'],pid)).fetchone())
+            if r['visibility']!='Public' and (not u or (r['user_id']!=u['id'] and not saved)):
                 c.close(); return self.json(404,{'error':'Playlist not found'})
             data=playlist_json(c,r,'',uid); c.close()
         return self.json(200,{'playlist':data})
+
+    def save_playlist(self,pid):
+        u=require_user(self)
+        if not u:return
+        with DB_LOCK:
+            c=db(); p=c.execute('SELECT id,user_id,visibility FROM playlists WHERE id=?',(pid,)).fetchone()
+            if not p:
+                c.close(); return self.json(404,{'error':'Playlist not found'})
+            if p['visibility']!='Public':
+                c.close(); return self.json(403,{'error':'Only public playlists can be saved'})
+            c.execute('INSERT OR IGNORE INTO saved_playlists(user_id,playlist_id,saved_at) VALUES(?,?,?)',(u['id'],pid,now_iso()))
+            c.commit(); r=c.execute('SELECT * FROM playlists WHERE id=?',(pid,)).fetchone(); data=playlist_json(c,r,'',u['id']); c.close()
+        bump(); return self.json(200,{'ok':True,'playlist':data})
+
+    def unsave_playlist(self,pid):
+        u=require_user(self)
+        if not u:return
+        with DB_LOCK:
+            c=db(); c.execute('DELETE FROM saved_playlists WHERE user_id=? AND playlist_id=?',(u['id'],pid)); c.commit(); c.close()
+        bump(); return self.json(200,{'ok':True})
 
     def set_playlist_tracks(self, c, pid, u, ids):
         c.execute('DELETE FROM playlist_tracks WHERE playlist_id=?',(pid,))
@@ -1064,13 +1106,43 @@ class H(BaseHTTPRequestHandler):
         bump()
         return self.json(201,{'playlist':data})
 
+    def add_playlist_track(self,pid):
+        u=require_user(self)
+        if not u:return
+        d=self.parse_json(); tid=int(d.get('trackId') or 0)
+        if tid<=0:return self.json(400,{'error':'Invalid trackId'})
+        with DB_LOCK:
+            c=db(); p=c.execute('SELECT id,user_id FROM playlists WHERE id=?',(pid,)).fetchone()
+            if not p: c.close(); return self.json(404,{'error':'Playlist not found'})
+            if p['user_id']!=u['id']: c.close(); return self.json(403,{'error':'Only the playlist owner can add songs'})
+            tr=c.execute("SELECT id FROM tracks WHERE id=? AND (user_id=? OR visibility IN ('Public','Unlisted'))",(tid,u['id'])).fetchone()
+            if not tr: c.close(); return self.json(404,{'error':'Track not available'})
+            pos=c.execute('SELECT COALESCE(MAX(position),-1)+1 n FROM playlist_tracks WHERE playlist_id=?',(pid,)).fetchone()['n']
+            c.execute('INSERT OR IGNORE INTO playlist_tracks(playlist_id,track_id,position) VALUES(?,?,?)',(pid,tid,pos))
+            c.execute('UPDATE playlists SET updated_at=? WHERE id=?',(now_iso(),pid)); c.commit()
+            r=c.execute('SELECT * FROM playlists WHERE id=?',(pid,)).fetchone(); data=playlist_json(c,r,'',u['id']); c.close()
+        bump(); return self.json(200,{'ok':True,'playlist':data})
+
+    def remove_playlist_track(self,pid):
+        u=require_user(self)
+        if not u:return
+        d=self.parse_json(); tid=int(d.get('trackId') or 0)
+        if tid<=0:return self.json(400,{'error':'Invalid trackId'})
+        with DB_LOCK:
+            c=db(); p=c.execute('SELECT id,user_id FROM playlists WHERE id=?',(pid,)).fetchone()
+            if not p: c.close(); return self.json(404,{'error':'Playlist not found'})
+            if p['user_id']!=u['id']: c.close(); return self.json(403,{'error':'Only the playlist owner can remove songs'})
+            c.execute('DELETE FROM playlist_tracks WHERE playlist_id=? AND track_id=?',(pid,tid)); c.execute('UPDATE playlists SET updated_at=? WHERE id=?',(now_iso(),pid)); c.commit(); c.close()
+        bump(); return self.json(200,{'ok':True})
+
     def patch_playlist(self,pid):
         u=require_user(self)
         if not u: return
         d=self.parse_json()
         with DB_LOCK:
-            c=db(); p=c.execute('SELECT * FROM playlists WHERE id=? AND user_id=?',(pid,u['id'])).fetchone()
+            c=db(); p=c.execute('SELECT * FROM playlists WHERE id=?',(pid,)).fetchone()
             if not p: c.close(); return self.json(404,{'error':'Playlist not found'})
+            if p['user_id']!=u['id']: c.close(); return self.json(403,{'error':'Only the playlist owner can edit or add songs'})
             name=str(d.get('name',p['name'])).strip()[:120] or p['name']
             vis=self.playlist_vis(d,p['visibility'])
             c.execute('UPDATE playlists SET name=?,artist=?,description=?,visibility=?,cover_url=?,background_url=?,updated_at=? WHERE id=?',(name,u['name'],str(d.get('description',p['description']))[:500],vis,_pl_img(d.get('coverData',p['cover_url']),'cov_'),_pl_img(d.get('backgroundData',p['background_url']),'pbg_'),now_iso(),pid))
@@ -1084,8 +1156,9 @@ class H(BaseHTTPRequestHandler):
         u=require_user(self)
         if not u: return
         with DB_LOCK:
-            c=db(); p=c.execute('SELECT id FROM playlists WHERE id=? AND user_id=?',(pid,u['id'])).fetchone()
+            c=db(); p=c.execute('SELECT id,user_id FROM playlists WHERE id=?',(pid,)).fetchone()
             if not p: c.close(); return self.json(404,{'error':'Playlist not found'})
+            if p['user_id']!=u['id']: c.close(); return self.json(403,{'error':'Only the playlist owner can delete it'})
             c.execute('DELETE FROM playlists WHERE id=?',(pid,)); c.commit(); c.close()
         bump()
         return self.json(200,{'ok':True})
