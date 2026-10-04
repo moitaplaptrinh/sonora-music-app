@@ -35,7 +35,7 @@ def find_index():
     if env and (ROOT / env).is_file():
         return ROOT / env
     cands = []
-    for pat in ('index*.html','sonora*.html'):
+    for pat in ('index*.html','sonora*.html','SONORA*.html'):
         cands.extend(ROOT.glob(pat))
     cands = sorted({p.resolve() for p in cands if p.is_file()}, key=lambda p: p.stat().st_mtime, reverse=True)
     return cands[0] if cands else ROOT / 'index.html'
@@ -520,6 +520,12 @@ class H(BaseHTTPRequestHandler):
     def clear_cookie(self):
         return {'Set-Cookie':'sonora_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'}
 
+    def do_HEAD(self):
+        try: self.route('HEAD')
+        except ValueError as e: self.json(400,{'error':str(e)})
+        except (BrokenPipeError, ConnectionResetError): pass
+        except Exception as e: print('HEAD error',repr(e)); self.json(500,{'error':'Internal server error'})
+
     def do_GET(self):
         try: self.route('GET')
         except ValueError as e: self.json(400,{'error':str(e)})
@@ -549,7 +555,7 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
     def route(self,method):
         p=urllib.parse.urlparse(self.path); path=p.path; q=urllib.parse.parse_qs(p.query)
-        if path in ('/','/index.html'): return self.serve_file(find_index())
+        if path in ('/','/index.html') and method in ('GET','HEAD'): return self.serve_file(find_index(), head=(method=='HEAD'))
         if path=='/favicon.ico': return self.text(204,'')
         if path=='/api/health': return self.json(200,{'ok':True,'service':'sonora','time':now_iso(),'googleOAuthConfigured':oauth_configured()},{'Access-Control-Allow-Origin':'*'})
         if path=='/api/sync' and method=='GET': return self.sync_poll(q)
@@ -596,7 +602,7 @@ class H(BaseHTTPRequestHandler):
         if path=='/api/playlists' and method=='GET': return self.get_playlists()
         if path=='/api/playlists' and method=='POST': return self.create_playlist()
         if path=='/api/search' and method=='GET': return self.search(q)
-        m=re.match(r'^/api/users/([A-Za-z0-9_]+)$',path)
+        m=re.match(r'^/api/users/([^/]+)$',path)
         if m and method=='GET': return self.get_profile(m.group(1))
         m=re.match(r'^/api/users/(\d+)/follow$',path)
         if m and method=='POST': return self.toggle_follow(int(m.group(1)))
@@ -612,12 +618,13 @@ class H(BaseHTTPRequestHandler):
             return self.serve_file(UPLOAD_DIR/name)
         self.serve_file(find_index()) if not path.startswith('/api/') else self.json(404,{'error':'Not found'})
 
-    def serve_file(self,path):
+    def serve_file(self,path,head=False):
         if not path.exists() or not path.is_file(): return self.text(404,'Not found')
         ctype=mimetypes.guess_type(str(path))[0] or 'application/octet-stream'; size=path.stat().st_size
         self.send_response(200); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(size))
         if ctype.startswith('text/html'): self.send_header('Cache-Control','no-cache')
         self.end_headers()
+        if head: return
         with path.open('rb') as f:
             while True:
                 b=f.read(1024*1024)
@@ -770,10 +777,13 @@ class H(BaseHTTPRequestHandler):
         if raw.startswith('@'): raw=raw[1:]
         with DB_LOCK:
             c=db()
+            # Accept profile lookup by numeric ID, username, @username and u:username.
+            # Keep one canonical path so links copied from search/profile cards always resolve.
             if raw.isdigit():
                 row=c.execute('SELECT * FROM users WHERE id=?',(int(raw),)).fetchone()
             else:
-                row=c.execute('SELECT * FROM users WHERE lower(username)=lower(?)',(raw,)).fetchone()
+                norm=raw.lstrip('@').strip().lower()
+                row=c.execute('SELECT * FROM users WHERE lower(username)=?',(norm,)).fetchone()
             if not row:
                 c.close(); return self.json(404,{'error':'Profile not found'})
             uid=row['id']; is_owner=bool(viewer and int(viewer['id'])==int(uid))
@@ -862,6 +872,9 @@ class H(BaseHTTPRequestHandler):
         artist=str(fields.get('artist','')).strip() or u['name']; album=str(fields.get('album','')).strip(); genre=str(fields.get('genre','')).strip(); tags=str(fields.get('tags','')).strip(); vis=str(fields.get('visibility','Public')).title(); explicit=1 if str(fields.get('explicit','false')).lower() in ('1','true','yes') else 0
         if vis not in ('Public','Unlisted','Private'): vis='Public'
         safe=safe_name(f['filename']); unique=f'{secrets.token_hex(8)}_{safe}'; path=UPLOAD_DIR/unique; path.write_bytes(f['data'])
+        mime=(f.get('content_type') or '').split(';')[0].strip().lower()
+        if not mime or mime=='application/octet-stream':
+            mime=mimetypes.guess_type(safe)[0] or 'application/octet-stream'
         try: dur=max(0.0,min(float(fields.get('duration','0') or 0),86400.0))
         except ValueError: dur=0.0
         try:
@@ -876,7 +889,7 @@ class H(BaseHTTPRequestHandler):
                 cover_name=f'cov_{secrets.token_hex(8)}{ext}'; (UPLOAD_DIR/cover_name).write_bytes(cf['data'])
         try:
             with DB_LOCK:
-                c=db(); cur=c.execute('INSERT INTO tracks(user_id,title,artist,album,genre,tags,visibility,explicit,filename,mime,size_bytes,duration,peaks,cover,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(u['id'],title,artist,album,genre,tags,vis,explicit,unique,f['content_type'],len(f['data']),dur,json.dumps(pk),cover_name,now_iso())); tid=cur.lastrowid; c.commit(); row=c.execute(TRACK_SELECT+' WHERE t.id=?',(tid,)).fetchone(); c.close()
+                c=db(); cur=c.execute('INSERT INTO tracks(user_id,title,artist,album,genre,tags,visibility,explicit,filename,mime,size_bytes,duration,peaks,cover,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(u['id'],title,artist,album,genre,tags,vis,explicit,unique,mime,len(f['data']),dur,json.dumps(pk),cover_name,now_iso())); tid=cur.lastrowid; c.commit(); row=c.execute(TRACK_SELECT+' WHERE t.id=?',(tid,)).fetchone(); c.close()
         except Exception:
             try: path.unlink()
             except OSError: pass
@@ -908,7 +921,7 @@ class H(BaseHTTPRequestHandler):
             if start> end or start>=size: self.send_response(416); self.send_header('Content-Range',f'bytes */{size}'); self.end_headers(); return
             end=min(end,size-1); status=206
         length=end-start+1; ctype=r['mime'] or 'application/octet-stream'
-        self.send_response(status); self.send_header('Content-Type',ctype); self.send_header('Accept-Ranges','bytes'); self.send_header('Content-Length',str(length));
+        self.send_response(status); self.send_header('Content-Type',ctype); self.send_header('Accept-Ranges','bytes'); self.send_header('Content-Length',str(length)); self.send_header('Cache-Control','public, max-age=3600, immutable');
         if status==206: self.send_header('Content-Range',f'bytes {start}-{end}/{size}')
         self.end_headers();
         with path.open('rb') as f:
@@ -1091,15 +1104,10 @@ ThreadingHTTPServer.allow_reuse_address=True
 try:
     httpd=ThreadingHTTPServer((HOST,PORT),H)
 except OSError as exc:
-    if getattr(exc, 'errno', None) == 98:
-        fallback=int(os.environ.get('SONORA_FALLBACK_PORT','8787'))
-        if fallback == PORT:
-            fallback += 1
-        print(f'Port {PORT} is busy; using fallback port {fallback}', flush=True)
-        PORT=fallback
-        httpd=ThreadingHTTPServer((HOST,PORT),H)
-    else:
-        raise
-print(f'SONORA server listening on http://127.0.0.1:{PORT} (data: {DATA_DIR})', flush=True)
+    if getattr(exc, 'errno', None) in (48, 98, 10048):
+        raise SystemExit(f'ERROR: Port {PORT} is already in use. Close the old SONORA server window/process, then run this server again.')
+    raise
+print(f'SONORA server listening on http://{HOST}:{PORT} (data: {DATA_DIR})', flush=True)
 print(f'Open SONORA at: http://localhost:{PORT}/   (page: {find_index().name})', flush=True)
+print('LAN access: use http://<this-computer-IP>:%d/ from another device on the same network.' % PORT, flush=True)
 httpd.serve_forever()
