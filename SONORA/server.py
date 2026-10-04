@@ -66,16 +66,22 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 def db():
-    c = sqlite3.connect(DB_PATH, check_same_thread=False)
+    # IMPORTANT: do not change journal_mode every time a request opens a connection.
+    # On a threaded server, concurrent PRAGMA journal_mode=WAL calls can themselves
+    # contend for SQLite's write lock and cause "database is locked" during OAuth.
+    c = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
     c.row_factory = sqlite3.Row
-    c.execute('PRAGMA busy_timeout=5000')
-    c.execute('PRAGMA journal_mode=WAL')
+    c.execute('PRAGMA busy_timeout=30000')
     c.execute('PRAGMA foreign_keys=ON')
     return c
 
 def init_db():
     with DB_LOCK:
         c = db()
+        # Set WAL once at startup, not on every request/connection.
+        c.execute('PRAGMA journal_mode=WAL')
+        c.execute('PRAGMA synchronous=NORMAL')
+        c.execute('PRAGMA wal_autocheckpoint=1000')
         c.executescript('''
         CREATE TABLE IF NOT EXISTS users(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
