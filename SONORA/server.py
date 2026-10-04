@@ -202,6 +202,9 @@ def init_db():
             except sqlite3.OperationalError:
                 pass
         c.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub)')
+        # Canonical author identity: every track/playlist uses its real owner profile.
+        c.execute('UPDATE tracks SET artist=(SELECT name FROM users WHERE users.id=tracks.user_id) WHERE EXISTS (SELECT 1 FROM users WHERE users.id=tracks.user_id)')
+        c.execute('UPDATE playlists SET artist=(SELECT name FROM users WHERE users.id=playlists.user_id) WHERE EXISTS (SELECT 1 FROM users WHERE users.id=playlists.user_id)')
         for r in c.execute("SELECT id,cover_url,background_url FROM playlists WHERE cover_url LIKE 'data:%' OR background_url LIKE 'data:%'").fetchall():
             c.execute('UPDATE playlists SET cover_url=?,background_url=? WHERE id=?',(_pl_img(r['cover_url'],'cov_'),_pl_img(r['background_url'],'pbg_'),r['id']))
         c.commit(); c.close()
@@ -276,7 +279,7 @@ def track_json(r, base=''):
         peaks = []
     cov = r['cover'] if 'cover' in k and r['cover'] else ''
     return {
-      'id': r['id'], 'serverId': r['id'], 'title': r['title'], 'artist': r['artist'], 'album': r['album'],
+      'id': r['id'], 'serverId': r['id'], 'title': r['title'], 'artist': r['owner_name'] if 'owner_name' in k else r['artist'], 'album': r['album'],
       'genre': r['genre'], 'tags': r['tags'], 'visibility': r['visibility'], 'explicit': bool(r['explicit']),
       'duration': r['duration'], 'size': r['size_bytes'], 'playCount': r['play_count'],
       'commentCount': r['comment_count'] if 'comment_count' in k else 0,
@@ -296,7 +299,7 @@ def playlist_json(c, r, base='', viewer_id=0):
         (r['id'], viewer_id)).fetchall()
     own = c.execute('SELECT id,name,username,avatar_url,background_url,bio FROM users WHERE id=?', (r['user_id'],)).fetchone()
     return {
-      'id': r['id'], 'name': r['name'], 'artist': r['artist'], 'description': r['description'],
+      'id': r['id'], 'name': r['name'], 'artist': own['name'] if own else r['artist'], 'description': r['description'],
       'visibility': r['visibility'], 'public': r['visibility'] == 'Public', 'coverUrl': r['cover_url'],
       'backgroundUrl': r['background_url'], 'trackIds': [x['track_id'] for x in tr],
       'createdAt': r['created_at'], 'updatedAt': r['updated_at'],
@@ -789,6 +792,8 @@ class H(BaseHTTPRequestHandler):
             clash=c.execute('SELECT id FROM users WHERE username=? AND id!=?',(username,u['id'])).fetchone()
             if clash: c.close(); return self.json(409,{'error':'Username already exists'})
             c.execute('UPDATE users SET name=?,username=?,bio=?,avatar_url=?,background_url=? WHERE id=?',(name,username,bio,avatar,background,u['id']))
+            c.execute('UPDATE tracks SET artist=? WHERE user_id=?',(name,u['id']))
+            c.execute('UPDATE playlists SET artist=? WHERE user_id=?',(name,u['id']))
             c.commit(); row=c.execute('SELECT * FROM users WHERE id=?',(u['id'],)).fetchone(); c.close()
         bump()
         return self.json(200,{'user':public_user(row)})
@@ -892,7 +897,8 @@ class H(BaseHTTPRequestHandler):
         if not f or not f['data']: return self.json(400,{'error':'Audio file is required'})
         if len(f['data'])>MAX_UPLOAD: return self.json(413,{'error':'Audio file too large'})
         title=str(fields.get('title','')).strip() or Path(f['filename']).stem
-        artist=str(fields.get('artist','')).strip() or u['name']; album=str(fields.get('album','')).strip(); genre=str(fields.get('genre','')).strip(); tags=str(fields.get('tags','')).strip(); vis=str(fields.get('visibility','Public')).title(); explicit=1 if str(fields.get('explicit','false')).lower() in ('1','true','yes') else 0
+        # The authenticated profile is the only author; ignore any client-provided artist/author.
+        artist=u['name']; album=str(fields.get('album','')).strip(); genre=str(fields.get('genre','')).strip(); tags=str(fields.get('tags','')).strip(); vis=str(fields.get('visibility','Public')).title(); explicit=1 if str(fields.get('explicit','false')).lower() in ('1','true','yes') else 0
         if vis not in ('Public','Unlisted','Private'): vis='Public'
         safe=safe_name(f['filename']); unique=f'{secrets.token_hex(8)}_{safe}'; path=UPLOAD_DIR/unique; path.write_bytes(f['data'])
         mime=(f.get('content_type') or '').split(';')[0].strip().lower()
@@ -1010,7 +1016,7 @@ class H(BaseHTTPRequestHandler):
         ids=[int(x) for x in (d.get('trackIds') or []) if str(x).isdigit()]
         with DB_LOCK:
             c=db(); now=now_iso()
-            cur=c.execute('INSERT INTO playlists(user_id,name,artist,description,visibility,cover_url,background_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',(u['id'],name,str(d.get('artist',''))[:120],str(d.get('description',''))[:500],vis,_pl_img(d.get('coverData',''),'cov_'),_pl_img(d.get('backgroundData',''),'pbg_'),now,now)); pid=cur.lastrowid
+            cur=c.execute('INSERT INTO playlists(user_id,name,artist,description,visibility,cover_url,background_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',(u['id'],name,u['name'],str(d.get('description',''))[:500],vis,_pl_img(d.get('coverData',''),'cov_'),_pl_img(d.get('backgroundData',''),'pbg_'),now,now)); pid=cur.lastrowid
             self.set_playlist_tracks(c,pid,u,ids)
             c.commit(); r=c.execute('SELECT * FROM playlists WHERE id=?',(pid,)).fetchone(); data=playlist_json(c,r,'',u['id']); c.close()
         bump()
@@ -1025,7 +1031,7 @@ class H(BaseHTTPRequestHandler):
             if not p: c.close(); return self.json(404,{'error':'Playlist not found'})
             name=str(d.get('name',p['name'])).strip()[:120] or p['name']
             vis=self.playlist_vis(d,p['visibility'])
-            c.execute('UPDATE playlists SET name=?,artist=?,description=?,visibility=?,cover_url=?,background_url=?,updated_at=? WHERE id=?',(name,str(d.get('artist',p['artist']))[:120],str(d.get('description',p['description']))[:500],vis,_pl_img(d.get('coverData',p['cover_url']),'cov_'),_pl_img(d.get('backgroundData',p['background_url']),'pbg_'),now_iso(),pid))
+            c.execute('UPDATE playlists SET name=?,artist=?,description=?,visibility=?,cover_url=?,background_url=?,updated_at=? WHERE id=?',(name,u['name'],str(d.get('description',p['description']))[:500],vis,_pl_img(d.get('coverData',p['cover_url']),'cov_'),_pl_img(d.get('backgroundData',p['background_url']),'pbg_'),now_iso(),pid))
             if 'trackIds' in d:
                 self.set_playlist_tracks(c,pid,u,[int(x) for x in (d.get('trackIds') or []) if str(x).isdigit()])
             c.commit(); r=c.execute('SELECT * FROM playlists WHERE id=?',(pid,)).fetchone(); data=playlist_json(c,r,'',u['id']); c.close()
