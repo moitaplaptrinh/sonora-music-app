@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""SONORA v5. Dat file nay + manifest.webmanifest + sw.js + icon-*.png vao thu muc SONORA (canh server.py va index.html), chay:  python sonora_v5.py
+Moi file duoc backup *.bak; neu 1 diem va khong khop thi file do KHONG bi ghi. Chay lai nhieu lan van an toan."""
+import shutil
+from pathlib import Path
+MARK = 'sonora-v5'
+here = Path(__file__).resolve().parent
+
+SERVER = [
+("OAUTH_STATE_TTL = int(os.environ.get('OAUTH_STATE_TTL_SECONDS', '600'))",
+ "OAUTH_STATE_TTL = int(os.environ.get('OAUTH_STATE_TTL_SECONDS', '600'))\nADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'quangchinhd111@gmail.com').strip().lower()  # sonora-v5"),
+("c.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub)')",
+ r'''c.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub)')
+        for col in ("role TEXT DEFAULT 'listener'", "copyright INTEGER DEFAULT 0"):
+            try: c.execute('ALTER TABLE users ADD COLUMN ' + col)
+            except sqlite3.OperationalError: pass
+        c.execute("CREATE TABLE IF NOT EXISTS artist_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,kind TEXT NOT NULL DEFAULT 'artist',message TEXT DEFAULT '',status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL,decided_at TEXT,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)")'''),
+("if include_email and 'email' in keys:",
+ r'''em = ((row['email'] if 'email' in keys else '') or '').lower()
+    out['role'] = 'admin' if em == ADMIN_EMAIL else ((row['role'] if 'role' in keys else None) or 'listener')
+    out['copyright'] = bool(row['copyright']) if 'copyright' in keys and row['copyright'] else False
+    if include_email and 'email' in keys:'''),
+("class H(BaseHTTPRequestHandler):",
+ r'''PWA = {'/manifest.webmanifest': ('manifest.webmanifest', 'application/manifest+json'), '/sw.js': ('sw.js', 'application/javascript; charset=utf-8'), '/icon-192.png': ('icon-192.png', 'image/png'), '/icon-512.png': ('icon-512.png', 'image/png'), '/icon-maskable-512.png': ('icon-maskable-512.png', 'image/png'), '/.well-known/assetlinks.json': ('.well-known/assetlinks.json', 'application/json')}
+
+class H(BaseHTTPRequestHandler):'''),
+("if path=='/favicon.ico': return self.text(204,'')",
+ r'''if path in PWA and method in ('GET','HEAD'): return self.serve_pwa(path, method=='HEAD')
+        if path=='/api/artist-requests' and method=='GET': return self.list_requests()
+        if path=='/api/artist-requests' and method=='POST': return self.create_request()
+        m=re.match(r'^/api/artist-requests/(\d+)/decide$',path)
+        if m and method=='POST': return self.decide_request(int(m.group(1)))
+        if path=='/favicon.ico': return self.text(204,'')'''),
+("def serve_file(self,path,head=False):",
+ r'''def serve_pwa(self,path,head=False):
+        name,ctype=PWA[path]; f=ROOT/name
+        if not f.is_file(): return self.text(404,'Not found')
+        raw=f.read_bytes()
+        self.send_response(200); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(len(raw)))
+        self.send_header('Cache-Control','public, max-age=86400' if path.startswith('/icon-') else 'no-cache')
+        if path=='/sw.js': self.send_header('Service-Worker-Allowed','/')
+        self.end_headers()
+        if not head: self.wfile.write(raw)
+
+    def create_request(self):
+        u=require_user(self)
+        if not u: return
+        d=self.parse_json(); kind=str(d.get('kind','artist')); kind=kind if kind in ('artist','copyright') else 'artist'
+        msg=str(d.get('message','')).strip()[:500]
+        if kind=='artist' and u.get('role') in ('artist','admin'): return self.json(400,{'error':'Your account is already an artist'})
+        if kind=='copyright' and u.get('copyright'): return self.json(400,{'error':'Copyright is already verified on your account'})
+        if not rate_ok('arq:%s'%u['id'],5,3600): return self.json(429,{'error':'Too many requests, try later'})
+        with DB_LOCK:
+            c=db()
+            if c.execute("SELECT 1 FROM artist_requests WHERE user_id=? AND kind=? AND status='pending'",(u['id'],kind)).fetchone():
+                c.close(); return self.json(409,{'error':'You already have a pending request of this type'})
+            c.execute('INSERT INTO artist_requests(user_id,kind,message,created_at) VALUES(?,?,?,?)',(u['id'],kind,msg,now_iso()))
+            for a in c.execute('SELECT id FROM users WHERE lower(email)=?',(ADMIN_EMAIL,)).fetchall():
+                c.execute('INSERT INTO notifications(user_id,type,title,body,created_at) VALUES(?,?,?,?,?)',(a['id'],'request','New %s request'%kind,('%s (@%s): %s'%(u['name'],u['username'],msg))[:300],now_iso()))
+            c.commit(); c.close()
+        bump(); return self.json(201,{'ok':True})
+
+    def list_requests(self):
+        u=require_user(self)
+        if not u: return
+        adm=u.get('role')=='admin'
+        base='SELECT r.*,x.name,x.username,x.avatar_url FROM artist_requests r JOIN users x ON x.id=r.user_id'
+        with DB_LOCK:
+            c=db()
+            if adm: rows=c.execute(base+" ORDER BY (r.status='pending') DESC,r.created_at DESC LIMIT 200").fetchall()
+            else: rows=c.execute(base+' WHERE r.user_id=? ORDER BY r.created_at DESC LIMIT 20',(u['id'],)).fetchall()
+            c.close()
+        return self.json(200,{'admin':adm,'requests':[{'id':r['id'],'kind':r['kind'],'message':r['message'],'status':r['status'],'createdAt':r['created_at'],'user':{'id':r['user_id'],'name':r['name'],'username':r['username'],'avatarUrl':r['avatar_url'] or ''}} for r in rows]})
+
+    def decide_request(self,rid):
+        u=require_user(self)
+        if not u: return
+        if u.get('role')!='admin': return self.json(403,{'error':'Only the admin can review requests'})
+        ok=bool(self.parse_json().get('approve'))
+        with DB_LOCK:
+            c=db(); r=c.execute('SELECT * FROM artist_requests WHERE id=?',(rid,)).fetchone()
+            if not r: c.close(); return self.json(404,{'error':'Request not found'})
+            if r['status']!='pending': c.close(); return self.json(409,{'error':'Request was already reviewed'})
+            c.execute('UPDATE artist_requests SET status=?,decided_at=? WHERE id=?',('approved' if ok else 'rejected',now_iso(),rid))
+            if ok and r['kind']=='copyright': c.execute("UPDATE users SET copyright=1, role=CASE WHEN COALESCE(role,'listener')='listener' THEN 'artist' ELSE role END WHERE id=?",(r['user_id'],))
+            elif ok: c.execute("UPDATE users SET role='artist' WHERE id=? AND COALESCE(role,'listener')='listener'",(r['user_id'],))
+            c.execute('INSERT INTO notifications(user_id,type,title,body,created_at) VALUES(?,?,?,?,?)',(r['user_id'],'request','Your %s request was %s'%(r['kind'],'approved' if ok else 'declined'),'',now_iso()))
+            c.commit(); c.close()
+        bump(); return self.json(200,{'ok':True,'status':'approved' if ok else 'rejected'})
+
+    def serve_file(self,path,head=False):'''),
+("d=self.parse_json(); title=str(d.get('title','')).strip()[:80]; kind=",
+ r'''if u.get('role') not in ('artist','admin'): return self.json(403,{'error':'Only artist accounts can host events. Send an artist request to the admin.'})
+        d=self.parse_json(); title=str(d.get('title','')).strip()[:80]; kind='''),
+]
+
+INDEX = [
+("communityComments[cur.serverId].map(x=>({t:x.position||0}))", "communityComments[cur.serverId].filter(x=>!x.parentId).map(x=>({t:x.position||0}))"),
+("((cur&&cm[cur.id]||[]).concat(", "((cur&&cm[cur.id]||[]).filter(m=>!m.parentId).concat("),
+("</head>", '<!-- sonora-v5 --><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/icon-192.png"><link rel="icon" type="image/png" href="/icon-192.png"><style id="sonora-v5-css">' + r'''
+.logo svg rect,.auth-logo svg rect{transform-box:fill-box;transform-origin:center;animation:v5bar 1.3s ease-in-out infinite alternate}.logo svg rect:nth-child(2),.auth-logo svg rect:nth-child(2){animation-delay:-.25s}.logo svg rect:nth-child(3),.auth-logo svg rect:nth-child(3){animation-delay:-.5s}.logo svg rect:nth-child(4),.auth-logo svg rect:nth-child(4){animation-delay:-.75s}.logo svg rect:nth-child(5),.auth-logo svg rect:nth-child(5){animation-delay:-1s}
+@keyframes v5bar{from{transform:scaleY(.45)}to{transform:scaleY(1.08)}}body.pz .top .logo svg rect{animation-play-state:paused}
+.main h2{display:flex;align-items:center;gap:10px}.main h2::before{content:"";width:4px;height:16px;border-radius:3px;background:var(--ac,var(--fg));opacity:.85;flex:none}
+.nv::before{content:"•";width:18px;text-align:center;opacity:.75;flex:none}.nv[data-v=home]::before{content:"⌂"}.nv[data-v=disc]::before{content:"✦"}.nv[data-v=search]::before{content:"⌕"}.nv[data-v=lib]::before{content:"▤"}.nv[data-v=liked]::before{content:"♥\FE0E"}.nv[data-v=rec]::before{content:"◷"}.nv[data-v=now]::before{content:"▶\FE0E"}.nv[data-v=imp]::before{content:"⇩"}.nv[data-v=artists]::before{content:"☺\FE0E"}.nv[data-v=up]::before{content:"⇪"}.nv[data-v=mst]::before{content:"◈"}.nv[data-v=feed]::before{content:"≋"}.nv[data-v=events]::before{content:"✧"}.nv[data-v=req]::before{content:"✉\FE0E"}.nv[data-v=set]::before{content:"⚙\FE0E"}
+.nv.on{box-shadow:inset 0 0 0 1px var(--bd)}.v5dot{display:none;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--ac,var(--fg));color:var(--acx,var(--bg));font:700 10px Inter,sans-serif;place-items:center;margin-left:auto}
+.grid>.card{animation:pg .6s var(--ease) backwards}.grid>.card:nth-child(2){animation-delay:.04s}.grid>.card:nth-child(3){animation-delay:.08s}.grid>.card:nth-child(4){animation-delay:.12s}.grid>.card:nth-child(5){animation-delay:.16s}.grid>.card:nth-child(6){animation-delay:.2s}.grid>.card:nth-child(n+7){animation-delay:.24s}
+.main .row{animation:pg .5s var(--ease) backwards}body:not(.pz):not(.spin) .pl .inf .cov{animation:v5pulse 3.2s ease-in-out infinite}@keyframes v5pulse{50%{transform:scale(1.045);box-shadow:0 10px 30px rgba(0,0,0,.35)}}
+.v5-card{display:grid;gap:10px}.v5-card p{margin:0}.v5st{display:flex;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--mut)}.comment-reply-box{animation:pg .35s var(--ease)}.comment-replies{border-left:2px solid var(--bd);padding-left:10px}
+#cut2{position:fixed;inset:0;z-index:310;display:none;place-items:center;background:color-mix(in srgb,var(--bg) 80%,transparent);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);cursor:pointer;overflow:hidden}#cut2.on{display:grid;animation:cmf .4s var(--ease)}#cut2.out{opacity:0;transition:opacity .5s}
+.c2-box{text-align:center;position:relative;padding:24px}.c2-box svg{width:74px;height:62px;margin-bottom:12px;animation:cmz .8s var(--spring) backwards}.c2-box h2{font:800 clamp(30px,7vw,64px)/1.05 var(--fh,Manrope),sans-serif;letter-spacing:-.045em;margin:0 0 8px;display:block;animation:cmz .8s .15s var(--ease) backwards}.c2-box h2::before{display:none}.c2-box p{color:var(--mut);font-size:17px;animation:cmz .8s .3s var(--ease) backwards}
+.c2-conf i{position:absolute;left:50%;top:42%;width:8px;height:14px;border-radius:2px;background:var(--c);opacity:0;animation:c2f 1.7s var(--d) cubic-bezier(.2,.8,.3,1) forwards}@keyframes c2f{0%{opacity:1;transform:translate(0,0) rotate(0)}100%{opacity:0;transform:translate(var(--dx),var(--dy)) rotate(var(--r))}}
+@media (max-width:760px) and (pointer:coarse){.pl .rt1{cursor:pointer}}
+''' + '</style></head>'),
+("</body>", '<script id="sonora-v5-js">' + r'''
+(()=>{
+const q1=s=>document.querySelector(s),role=()=>(API.user&&API.user.role)||'listener',isAdmin=()=>role()==='admin',isArtist=()=>role()==='artist'||isAdmin();
+/* ---- cutscene 2: celebrate / goodbye overlay ---- */
+const CF=document.createElement('div');CF.id='cut2';document.body.appendChild(CF);let busy=0;
+window.cutscene2=(t,s)=>{if(busy||document.body.classList.contains('an-off')||matchMedia('(prefers-reduced-motion:reduce)').matches)return;busy=1;
+const cols=['#ff3b5c','#ff8a00','#f5c400','#22c55e','#06b6d4','#3b82f6','#8b5cf6','#ec4899'],R=(a,b)=>(Math.random()*(b-a)+a).toFixed(1);
+const conf=Array.from({length:44},(_,i)=>`<i style="--c:${cols[i%8]};--dx:${R(-48,48)}vw;--dy:${R(-30,45)}vh;--r:${R(-540,540)}deg;--d:${(Math.random()*.4).toFixed(2)}s"></i>`).join('');
+CF.innerHTML=`<div class="c2-box"><div class="c2-conf">${conf}</div><svg viewBox="0 0 22 18" fill="currentColor" aria-hidden="true"><rect x="0" y="6" width="2.4" height="6" rx="1.2"/><rect x="4.9" y="2" width="2.4" height="14" rx="1.2"/><rect x="9.8" y="0" width="2.4" height="18" rx="1.2"/><rect x="14.7" y="4" width="2.4" height="10" rx="1.2"/><rect x="19.6" y="7" width="2.4" height="4" rx="1.2"/></svg><h2>${E(t)}</h2><p>${E(s||'')}</p></div>`;CF.className='on';
+const end=()=>{CF.classList.add('out');setTimeout(()=>{CF.className='';CF.innerHTML='';busy=0},520)};CF.onclick=end;setTimeout(end,2600)};
+const _ao=axOut;axOut=function(){cutscene2('See you soon','Your sound will be waiting.');_ao()};
+const _ai=axIn;axIn=function(u,b){_ai(u,b);setTimeout(poll,700)};
+const _sp=syncPublishedToServer;syncPublishedToServer=async function(...a){const r=await _sp(...a);if(r&&r.ok)cutscene2('Published',r.ok+(r.ok>1?' tracks are':' track is')+' live on SONORA');return r};
+/* ---- comments: threaded replies for local + cloud tracks ---- */
+cmHtml=function(t){
+const srv=t.serverId&&API.online;let L=srv?communityComments[t.serverId]:(cm[t.id]||[]).map(x=>x.text!==undefined?x:{id:x.id,text:x.x,position:x.t,parentId:x.parentId||null,createdAt:x.id,user:{name:'You'}});
+if(srv&&L===undefined)return'<p class="mut">Loading comments…</p>';if(!L.length)return'<p class="mut">No comments yet. Be the first.</p>';
+const by={},nm={},ts=x=>+new Date(x.createdAt)||+x.createdAt||0;L.forEach(x=>{(by[x.parentId||0]=by[x.parentId||0]||[]).push(x);nm[x.id]=(x.user&&(x.user.name||x.user.username))||'Listener'});
+Object.values(by).forEach(a=>a.sort((a,b)=>ts(a)-ts(b)||a.id-b.id));by[0].sort((a,b)=>(+a.position||0)-(+b.position||0));
+const all=id=>(by[id]||[]).flatMap(k=>[k,...all(k.id)]);
+const item=(x,pn,extra)=>{const u=x.user||{},n=u.name||u.username||'Listener',av=u.avatarUrl?`background-image:url("${u.avatarUrl}")`:'';
+return`<div class="cm-thread" data-comment-thread="${x.id}"><div class="comment-main"><button class="comment-avatar" style="${av}" data-a="cseek" data-t="${x.position||0}" aria-label="Jump to ${fmt(x.position||0)}">${u.avatarUrl?'':E(n.slice(0,1).toUpperCase())}</button><div class="comment-body"><div>${u.id?`<button class="author-link" data-a="profile" data-id="${E(u.id)}" data-username="${E(u.username||'')}" style="padding:0;border:0;background:none"><b>${E(n)}</b></button>`:`<b>${E(n)}</b>`} <span class="st">${ago(x.createdAt||Date.now())}</span></div><div style="margin-top:4px">${pn?`<span class="st">↪ @${E(pn)} </span>`:''}${E(x.text)}</div><div class="comment-actions"><button data-a="cseek" data-t="${x.position||0}">${fmt(x.position||0)}</button><button data-a="showreply" data-id="${x.id}">Reply</button></div></div></div>${extra||''}</div>`};
+return(by[0]||[]).map(r=>{const rs=all(r.id);return item(r,'',rs.length?`<div class="comment-replies">${rs.map(c=>item(c,nm[c.parentId])).join('')}</div>`:'')}).join('')};
+window.addEventListener('click',e=>{const a=e.target.closest&&e.target.closest('[data-a=showreply]');if(!a)return;e.stopImmediatePropagation();e.preventDefault();
+const th=a.closest('.cm-thread');if(!th)return;const old=th.querySelector(':scope > .comment-reply-box');if(old){old.remove();return}
+const id=a.dataset.id,who=(th.querySelector('.comment-body b')||{}).textContent||'';
+th.querySelector(':scope > .comment-main').insertAdjacentHTML('afterend',`<div class="comment-reply-box"><input class="in" id="reply_${id}" placeholder="Reply to ${E(who)}…" maxlength="300"><button class="btn g" data-a="replyc" data-parent="${id}">Reply</button></div>`);const i=q1('#reply_'+id);if(i)i.focus()},true);
+document.addEventListener('keydown',e=>{const t=e.target;if(e.key==='Enter'&&!e.shiftKey&&t.matches&&t.matches('#socIn,#ci,.comment-reply-box input')){e.preventDefault();const b=t.parentElement.querySelector('[data-a=cmt],[data-a=replyc]');if(b)b.click()}});
+/* ---- roles, artist requests, events ---- */
+const form=()=>{const a=!isArtist(),c=!(API.user&&API.user.copyright);return(a||c)?`<p class="mut">${a?'Only artist accounts can host events. ':''}Send a request to the SONORA admin; you will get a notification when it is reviewed.</p><div id="v5my" class="v5st"></div><textarea class="in" id="v5msg" rows="3" maxlength="500" placeholder="Who are you? Add links, releases or copyright details"></textarea><div style="display:flex;gap:8px;flex-wrap:wrap">${a?'<button class="btn" data-a="v5req" data-k="artist">Request artist status</button>':''}${c?'<button class="btn g" data-a="v5req" data-k="copyright">Request copyright verification</button>':''}</div>`:''};
+const roleCard=()=>`<div class="mp glass v5-card" id="v5role"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><b style="font:800 18px Manrope,Inter,sans-serif">Your account</b><span class="chip on">${isAdmin()?'Admin':isArtist()?'Artist':'Listener'}</span>${API.user.copyright?'<span class="chip">© Copyright verified</span>':''}<span style="flex:1"></span><button class="btn g" data-a="v5install">Install app</button></div>${form()}</div>`;
+async function myReq(){const el=q1('#v5my');if(!el||!backendReady())return;try{const r=await apiFetch('/api/artist-requests');el.innerHTML=(r.requests||[]).slice(0,3).map(x=>`<span class="chip">${E(x.kind)} · ${E(x.status)} · ${ago(x.createdAt)}</span>`).join('')}catch(_){}}
+function deco(){const m=q1('#main');if(!m||!API.user)return;
+if(view==='events'){const p=m.querySelector('h1 + p');if(!p)return;if(isArtist()){if(!q1('#v5ok'))p.insertAdjacentHTML('afterend','<p id="v5ok"><span class="chip on">✦ Artist account · you can host events</span></p>')}else if(!q1('#v5req')){const f=m.querySelector('.mp.glass.mg');if(f)f.remove();p.insertAdjacentHTML('afterend',`<div class="mp glass v5-card" id="v5req"><h2 style="margin:0">Become an artist</h2>${form()}</div>`);myReq()}}
+else if(view==='set'&&!q1('#v5role')){const h=m.querySelector('h1');if(h){h.insertAdjacentHTML('afterend',roleCard());myReq()}}
+else if(view==='profile'){const h=m.querySelector('.profile-handle');if(h&&!h.dataset.v5){h.dataset.v5=1;const p=Object.values(PROFILE_CACHE).find(x=>x&&x.user&&'@'+x.user.username===h.textContent.trim());const r=p&&p.user&&p.user.role;if(r&&r!=='listener')h.insertAdjacentHTML('beforeend',` · ✦ ${r==='admin'?'Admin':'Artist'}${p.user.copyright?' · © verified':''}`)}}}
+let tick=0;new MutationObserver(()=>{if(tick)return;tick=requestAnimationFrame(()=>{tick=0;try{deco()}catch(e){console.warn(e)}})}).observe(q1('#main'),{childList:true});
+function nav(){const ex=document.querySelectorAll('[data-v=req]');if(!(API.user&&isAdmin())){ex.forEach(x=>x.remove());return}
+if(!q1('.side .nv[data-v=req]')){const e=q1('.side .nv[data-v=events]');if(e)e.insertAdjacentHTML('afterend','<button class="nv" data-a="nav" data-v="req">Requests <span id="v5dot" class="v5dot"></span></button>')}
+const g=q1('#mobileMoreSheet .mms-grid');if(g&&!g.querySelector('[data-v=req]'))g.insertAdjacentHTML('afterbegin','<button data-a="nav" data-v="req">Requests</button>')}
+async function reqPage(top){const m=q1('#main');m.innerHTML='<h1>Requests</h1><p class="mut">Artist and copyright requests sent to the admin.</p><div id="v5list"><p class="mut">Loading…</p></div>';
+document.querySelectorAll('.nv[data-v]').forEach(b=>b.classList.toggle('on',b.dataset.v==='req'));if(top){m.scrollTop=0;m.classList.remove('in');void m.offsetWidth;m.classList.add('in')}
+try{const r=await apiFetch('/api/artist-requests');if(view!=='req')return;q1('#v5list').innerHTML=(r.requests||[]).length?r.requests.map(x=>`<div class="row" style="cursor:default"><div class="mini-author" style="width:40px;height:40px;flex:none;${authorAvatar(x.user)}">${x.user.avatarUrl?'':E((x.user.name||'?')[0].toUpperCase())}</div><div class="rt1"><b>${E(x.user.name)} · ${E(x.kind)}</b><span>@${E(x.user.username)} · ${ago(x.createdAt)} · ${E(x.status)}</span><small class="song-meta" style="white-space:normal">${E(x.message||'No message')}</small></div>${r.admin&&x.status==='pending'?`<button class="btn" data-a="v5dec" data-id="${x.id}" data-v="1">Approve</button><button class="btn g" data-a="v5dec" data-id="${x.id}" data-v="0">Decline</button>`:''}</div>`).join(''):'<p class="mut">No requests yet.</p>'}catch(e){const l=q1('#v5list');if(l)l.innerHTML='<p class="mut">'+E(e.message||'Could not load requests')+'</p>'}}
+const _r=render;render=async function(top){if(view==='req'){await reqPage(top);return}return _r(top)};
+let dip=null;addEventListener('beforeinstallprompt',e=>{e.preventDefault();dip=e});
+window.addEventListener('click',async e=>{const a=e.target.closest&&e.target.closest('[data-a^=v5]');if(!a)return;e.stopImmediatePropagation();e.preventDefault();const d=a.dataset;
+try{if(d.a==='v5install'){if(dip){dip.prompt();dip=null}else toast(/iPhone|iPad/.test(navigator.userAgent)?'Tap Share, then Add to Home Screen':'Browser menu, then Install app or Add to Home screen')}
+else if(d.a==='v5req'){if(!backendReady())return toast('Sign in first');a.disabled=true;await apiJson('/api/artist-requests',{kind:d.k,message:(q1('#v5msg')||{}).value||''});cutscene2('Request sent','The admin will review it soon.');myReq();a.disabled=false}
+else if(d.a==='v5dec'){await apiJson('/api/artist-requests/'+d.id+'/decide',{approve:d.v==='1'});toast(d.v==='1'?'Approved':'Declined');reqPage();poll()}}catch(err){toast(err.message||'Something went wrong');a.disabled=false}},true);
+document.addEventListener('click',e=>{if(e.target.closest&&e.target.closest('.pl .rt1')&&matchMedia('(max-width:760px) and (pointer:coarse)').matches&&cur)fpset(1)});
+async function poll(){if(!(API.online&&API.user)||document.hidden)return;try{const me=await apiFetch('/api/me');if(!me.user)return;const prev=API.user.role;API.user={...API.user,...me.user};cacheAuth(API.user);nav();
+if(prev&&prev!==me.user.role&&me.user.role==='artist'){cutscene2("You're an artist now",'You can host events on SONORA.');if(['events','set','req'].includes(view))render()}
+if(isAdmin()){const r=await apiFetch('/api/artist-requests'),n=(r.requests||[]).filter(x=>x.status==='pending').length,d=q1('#v5dot');if(d){d.textContent=n||'';d.style.display=n?'inline-grid':'none'}}}catch(_){}}
+setTimeout(poll,2500);setInterval(poll,20000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)poll()});
+const reg=()=>{if('serviceWorker'in navigator&&(location.protocol==='https:'||/^(localhost|127\.0\.0\.1)$/.test(location.hostname)))navigator.serviceWorker.register('/sw.js').catch(()=>{})};document.readyState==='complete'?reg():addEventListener('load',reg);
+})();
+''' + '</script></body>'),
+]
+
+def patch(path, items):
+    s = path.read_bytes().decode('utf-8')
+    if MARK in s: print('  - da va truoc do:', path.name); return
+    bad = []
+    for i, (old, new) in enumerate(items, 1):
+        c = s.count(old)
+        if c != 1: bad.append((i, c, old[:70])); continue
+        s = s.replace(old, new, 1)
+    if bad:
+        print('  ! KHONG ghi', path.name, '- diem va khong khop:')
+        for i, c, o in bad: print('     #%d x%d %s' % (i, c, o))
+        return
+    shutil.copy2(path, path.with_name(path.name + '.bak'))
+    path.write_bytes(s.encode('utf-8'))
+    print('  + da va %d diem: %s (backup .bak)' % (len(items), path.name))
+
+srv = next((here / n for n in ('server.py', 'sever.py') if (here / n).is_file()), None)
+pages = [p for n in ('index.html', 'SONORA.html', 'sonora.html', 'SONORA2.html') for p in [here / n] if p.is_file()]
+idx = pages[0] if pages else None
+print('Server:', srv.name if srv else 'KHONG THAY server.py', '| Giao dien:', idx.name if idx else 'KHONG THAY index.html')
+miss = [n for n in ('manifest.webmanifest', 'sw.js', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png') if not (here / n).is_file()]
+if miss: print('  ! Thieu file PWA canh script:', ', '.join(miss))
+if srv: patch(srv, SERVER)
+if idx: patch(idx, INDEX)
+print('Xong. Tat server cu, chay lai: python server.py -> mo trinh duyet, Ctrl+F5.')
