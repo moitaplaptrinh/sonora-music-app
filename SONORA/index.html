@@ -1045,7 +1045,232 @@ body.hac .hero .hx{background:linear-gradient(90deg,var(--fg),var(--ac));-webkit
 body.hac .hero .hart{box-shadow:var(--sh),0 0 0 1px color-mix(in srgb,var(--ac) 50%,transparent),0 28px 80px color-mix(in srgb,var(--ac) 16%,transparent)}
 </style>
 
+
+<style id="sonora-v7-refraction-graffiti">
+/* =========================================================
+   SONORA V7 — premium visual layer
+   Liquid Glass / refraction + sparse graffiti paint
+   No layout or playback logic changes here.
+   ========================================================= */
+:root{
+  --v7-ease:cubic-bezier(.22,1,.36,1);
+  --v7-spring:cubic-bezier(.34,1.34,.56,1);
+  --v7-glass-alpha:.56;
+  --v7-glass-blur:30px;
+  --v7-glass-sat:175%;
+}
+
+/* ---------- shared premium polish ---------- */
+.app{gap:16px;padding:16px 16px 112px}
+.top{border-radius:26px!important;box-shadow:0 18px 60px rgba(0,0,0,.10),inset 0 1px 0 rgba(255,255,255,.44)!important}
+.main{border-radius:28px!important;box-shadow:0 22px 75px rgba(0,0,0,.10),inset 0 1px 0 rgba(255,255,255,.38)!important}
+.side,.ctx{border-radius:26px!important}
+.card,.row,.menu,.pl{transition:transform .35s var(--v7-spring),box-shadow .35s var(--v7-ease),background .35s var(--v7-ease),border-color .35s var(--v7-ease)}
+.card:hover{box-shadow:0 18px 42px rgba(0,0,0,.12),inset 0 1px 0 rgba(255,255,255,.20)!important}
+.hero .hart{box-shadow:0 30px 80px rgba(0,0,0,.26),inset 0 1px 0 rgba(255,255,255,.26)!important}
+
+/* ---------- liquid glass: deeper depth + optical/refraction illusion ---------- */
+body.theme-liquid{
+  --bg:#0c1017;--fg:#f6f8fb;--mut:#9aa4b2;--g1:rgba(255,255,255,.115);--g2:rgba(255,255,255,.045);
+  --bd:rgba(255,255,255,.18);--hz:rgba(255,255,255,.07);--ho:rgba(255,255,255,.055);
+  --bf:#f8fafc;--bt:#0b0e13;
+  background:
+    radial-gradient(900px 520px at 8% 0%,rgba(86,142,255,.16),transparent 66%),
+    radial-gradient(760px 520px at 100% 12%,rgba(185,103,255,.13),transparent 62%),
+    radial-gradient(700px 500px at 46% 100%,rgba(63,219,215,.10),transparent 66%),
+    #0b0f16;
+}
+body.theme-liquid #bgLayer{filter:saturate(1.15) brightness(.85);opacity:.9}
+body.theme-liquid .glass,
+body.theme-liquid .card,
+body.theme-liquid .row,
+body.theme-liquid .menu,
+body.theme-liquid .pl,
+body.theme-liquid .ctx,
+body.theme-liquid .top{
+  position:relative;
+  overflow:hidden;
+  isolation:isolate;
+  background:
+    linear-gradient(145deg,rgba(255,255,255,.20),rgba(255,255,255,.055) 38%,rgba(255,255,255,.085) 66%,rgba(255,255,255,.025)),
+    radial-gradient(120% 110% at 14% 4%,rgba(255,255,255,.18),transparent 55%),
+    radial-gradient(120% 100% at 95% 92%,rgba(130,180,255,.08),transparent 54%);
+  border:1px solid rgba(255,255,255,.20)!important;
+  box-shadow:
+    0 26px 90px rgba(0,0,0,.30),
+    inset 0 1px 0 rgba(255,255,255,.38),
+    inset 0 -1px 0 rgba(255,255,255,.055),
+    inset 8px 0 24px rgba(255,255,255,.018);
+  backdrop-filter:blur(var(--v7-glass-blur)) saturate(var(--v7-glass-sat)) contrast(1.08);
+  -webkit-backdrop-filter:blur(var(--v7-glass-blur)) saturate(var(--v7-glass-sat)) contrast(1.08);
+}
+body.theme-liquid .glass::before,
+body.theme-liquid .card::before,
+body.theme-liquid .row::before,
+body.theme-liquid .pl::before,
+body.theme-liquid .menu::before{
+  content:"";position:absolute;inset:-8%;z-index:-1;pointer-events:none;opacity:.82;
+  background:
+    radial-gradient(180px 95px at 11% 8%,rgba(255,255,255,.26),transparent 70%),
+    radial-gradient(250px 160px at 88% 90%,rgba(126,164,255,.12),transparent 72%),
+    linear-gradient(118deg,transparent 0 42%,rgba(255,255,255,.13) 47%,transparent 53%);
+  transform:translate3d(0,0,0) scale(1.03);
+  filter:blur(1.3px) saturate(125%);
+  animation:v7GlassSheen 11s ease-in-out infinite alternate;
+}
+@keyframes v7GlassSheen{from{transform:translate3d(-1.5%,-1%,0) scale(1.03)}to{transform:translate3d(1.5%,1%,0) scale(1.06)}}
+body.theme-liquid .glass::after,
+body.theme-liquid .card::after,
+body.theme-liquid .row::after,
+body.theme-liquid .pl::after,
+body.theme-liquid .menu::after{
+  content:"";position:absolute;inset:0;z-index:3;pointer-events:none;
+  background:
+    linear-gradient(132deg,transparent 0 77%,rgba(255,255,255,.18) 78%,transparent 79.2%),
+    linear-gradient(317deg,transparent 0 82%,rgba(255,255,255,.15) 83%,transparent 84.2%),
+    linear-gradient(8deg,transparent 0 89%,rgba(255,255,255,.10) 90%,transparent 91%),
+    radial-gradient(130px 42px at 14% 3%,rgba(255,255,255,.22),transparent 72%);
+  opacity:.82;
+  clip-path:polygon(0 0,96% 0,100% 5%,99% 94%,94% 100%,4% 99%,0 93%,1% 8%);
+  mix-blend-mode:screen;
+}
+body.theme-liquid .glass,
+body.theme-liquid .card,
+body.theme-liquid .row,
+body.theme-liquid .pl{border-radius:24px 18px 26px 20px!important}
+body.theme-liquid .card:nth-child(3n){border-radius:20px 28px 22px 18px!important}
+body.theme-liquid .card:nth-child(3n+1){border-radius:28px 18px 24px 22px!important}
+body.theme-liquid .pl{border-radius:30px 22px 30px 24px!important}
+body.theme-liquid .btn,
+body.theme-liquid .chip,
+body.theme-liquid .ic,
+body.theme-liquid .pp{
+  background:linear-gradient(145deg,rgba(255,255,255,.15),rgba(255,255,255,.04));
+  border:1px solid rgba(255,255,255,.17)!important;
+  box-shadow:0 10px 28px rgba(0,0,0,.16),inset 0 1px 0 rgba(255,255,255,.23);
+  backdrop-filter:blur(18px) saturate(160%);-webkit-backdrop-filter:blur(18px) saturate(160%);
+}
+body.theme-liquid .pp{background:linear-gradient(145deg,rgba(255,255,255,.96),rgba(230,240,255,.80));color:#0a0d12!important}
+body.theme-liquid .fp{background:rgba(9,12,18,.56);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px)}
+body.theme-liquid .fcv,
+body.theme-liquid .hart,
+body.theme-liquid .plav,
+body.theme-liquid .big{
+  border-radius:38px 22px 42px 26px!important;
+  clip-path:polygon(0 0,96% 0,100% 7%,98% 95%,91% 100%,4% 98%,0 92%);
+  box-shadow:0 36px 90px rgba(0,0,0,.36),inset 0 1px 0 rgba(255,255,255,.22)!important;
+}
+body.theme-liquid .fp .fi h1{text-shadow:0 10px 44px rgba(0,0,0,.34)}
+body.theme-liquid .fp-close{background:rgba(255,255,255,.12)!important;border-color:rgba(255,255,255,.24)!important}
+body.theme-liquid .ctx .tb.on{background:rgba(255,255,255,.16)!important;color:#fff}
+body.theme-liquid .comment-body{background:rgba(255,255,255,.045);border-color:rgba(255,255,255,.14)}
+body.theme-liquid .comment-actions button{background:rgba(255,255,255,.045);border-color:rgba(255,255,255,.12)}
+
+/* prism cuts around the corners — a visual refraction cue without disturbing content */
+body.theme-liquid .glass,
+body.theme-liquid .card,
+body.theme-liquid .row,
+body.theme-liquid .pl,
+body.theme-liquid .menu{--p7a:rgba(255,255,255,.28)}
+body.theme-liquid .glass::marker{display:none}
+body.theme-liquid #liquidLens{opacity:1}
+#liquidLens{position:fixed;inset:-10%;z-index:1;pointer-events:none;opacity:0;transition:opacity .6s ease;mix-blend-mode:screen;overflow:hidden}
+#liquidLens::before,#liquidLens::after{content:"";position:absolute;inset:0;background:
+  radial-gradient(42% 28% at 14% 8%,rgba(255,255,255,.16),transparent 72%),
+  radial-gradient(26% 20% at 84% 22%,rgba(151,190,255,.13),transparent 72%),
+  linear-gradient(105deg,transparent 35%,rgba(255,255,255,.045) 49%,transparent 64%);
+  filter:blur(12px) saturate(150%);animation:v7Lens 16s ease-in-out infinite alternate}
+#liquidLens::after{opacity:.7;transform:scale(1.08);animation-duration:22s;animation-direction:alternate-reverse}
+@keyframes v7Lens{from{transform:translate3d(-2%,-1%,0) scale(1.02)}to{transform:translate3d(2%,1.5%,0) scale(1.07)}}
+
+/* ---------- sparse graffiti: paint splashes + strokes ---------- */
+body.theme-graffiti{
+  --bg:#f2ecdf;--fg:#121212;--mut:#5b544a;--g1:rgba(255,252,246,.88);--g2:rgba(255,250,242,.64);--bd:rgba(18,18,18,.14);--ho:rgba(18,18,18,.055);--hz:rgba(18,18,18,.08);
+  background:#f2ecdf;
+}
+body.theme-graffiti::before{display:none!important}
+#paintField{position:fixed;inset:0;z-index:1;pointer-events:none;overflow:hidden;opacity:0;transition:opacity .45s ease}
+body.theme-graffiti #paintField{opacity:1}
+.paint-stroke{position:absolute;left:var(--x);top:var(--y);width:var(--w);height:var(--h);transform:rotate(var(--r));border-radius:62% 28% 54% 18% / 34% 58% 27% 62%;background:var(--c);box-shadow:0 2px 0 rgba(0,0,0,.04);filter:url(#paintRough);mix-blend-mode:multiply;opacity:.82}
+.paint-stroke::before{content:"";position:absolute;width:18%;height:34%;left:-9%;top:14%;border-radius:50%;background:var(--c);box-shadow:calc(var(--w)*.9) calc(var(--h)*.66) 0 -2px var(--c),calc(var(--w)*.62) calc(var(--h)*.3) 0 -3px var(--c);opacity:.55}
+.paint-stroke::after{content:"";position:absolute;width:12%;height:12%;right:-6%;bottom:2%;border-radius:50%;background:var(--c);box-shadow:-22px 16px 0 -2px var(--c),-41px -2px 0 -3px var(--c);opacity:.58}
+body.theme-graffiti .glass,
+body.theme-graffiti .card,
+body.theme-graffiti .row,
+body.theme-graffiti .menu,
+body.theme-graffiti .pl,
+body.theme-graffiti .top,
+body.theme-graffiti .ctx{
+  position:relative;z-index:2;backdrop-filter:none;-webkit-backdrop-filter:none;
+  background:rgba(255,251,243,.92);border:2px solid #161616!important;
+  box-shadow:8px 8px 0 #161616,0 16px 40px rgba(0,0,0,.07)!important;
+  border-radius:20px 10px 18px 12px!important;
+}
+body.theme-graffiti .glass::before,
+body.theme-graffiti .glass::after,
+body.theme-graffiti .card::before,
+body.theme-graffiti .card::after,
+body.theme-graffiti .row::before,
+body.theme-graffiti .row::after,
+body.theme-graffiti .pl::before,
+body.theme-graffiti .pl::after,
+body.theme-graffiti .menu::before,
+body.theme-graffiti .menu::after{background:none;box-shadow:none;opacity:1}
+body.theme-graffiti .card{isolation:isolate}
+body.theme-graffiti .card:hover{transform:translateY(-5px) rotate(0deg) scale(1.015)!important;box-shadow:10px 12px 0 #161616,0 24px 42px rgba(0,0,0,.08)!important}
+body.theme-graffiti .hero .hart{border:3px solid #161616!important;box-shadow:10px 10px 0 #161616,0 0 0 8px rgba(255,45,122,.12)!important}
+body.theme-graffiti .btn:not(.g),body.theme-graffiti .pp{background:#ff2d7a!important;color:#fff!important;border:2px solid #161616!important;box-shadow:4px 4px 0 #161616!important}
+body.theme-graffiti .chip.on{background:#ffd400!important;color:#111!important;border:2px solid #161616!important;box-shadow:3px 3px 0 #161616!important}
+body.theme-graffiti .nv.on::after{background:#161616!important}
+body.theme-graffiti h1,body.theme-graffiti h2,body.theme-graffiti .logo{font-family:Caveat,'Comic Sans MS',cursive;letter-spacing:.01em}
+body.theme-graffiti .logo{font-size:30px}
+body.theme-graffiti .top{background:rgba(255,251,243,.96)}
+body.theme-graffiti .pl{box-shadow:9px 9px 0 #161616,0 18px 45px rgba(0,0,0,.08)!important}
+body.theme-graffiti .comment-body{background:#fffdf8;border:2px solid #161616;box-shadow:3px 3px 0 #161616}
+body.theme-graffiti .comment-actions button{background:#ffd400;border:1.5px solid #161616;color:#111}
+body.theme-graffiti .comment-replies{border-left:3px solid #161616}
+body.theme-graffiti .wave-comment-pin{border:2px solid #161616;background:#fffaf0;box-shadow:4px 4px 0 #161616}
+
+/* ---------- premium mobile composition ---------- */
+@media (max-width:760px) and (pointer:coarse){
+  .app,.app.nocx{padding:calc(7px + env(safe-area-inset-top,0px)) 7px calc(196px + env(safe-area-inset-bottom,0px));gap:8px}
+  .top{position:sticky;top:0;z-index:30;border-radius:17px!important;box-shadow:0 12px 34px rgba(0,0,0,.13)!important}
+  .main{padding:16px 9px 24px;border-radius:22px!important}
+  .hero{gap:12px;padding:8px 1px 4px}
+  .hero .hx{font-size:clamp(42px,13.5vw,62px);line-height:.90}
+  .hero .hart{width:min(78vw,295px);margin:8px auto 2px}
+  .grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+  .card{min-width:0}
+  .card .cov{aspect-ratio:1.02}
+  .pl{left:7px!important;right:7px!important;bottom:calc(70px + env(safe-area-inset-bottom,0px));height:108px!important;border-radius:22px!important;padding:8px!important}
+  .pl .inf{min-width:0}.pl .rg{display:flex!important}.pl .ctr{gap:8px}.pl .ctr .btns{gap:1px}
+  .pl .wv{min-width:0}.pl .wv canvas{height:22px}
+  .now-orb{transform:scale(.84);transform-origin:left center;margin-right:-6px}
+  #mobileQuickNav{left:7px;right:7px;bottom:calc(7px + env(safe-area-inset-bottom,0px));height:54px;border-radius:18px;z-index:40;box-shadow:0 14px 36px rgba(0,0,0,.15)}
+  #mobileMoreSheet{left:7px;right:7px;bottom:calc(69px + env(safe-area-inset-bottom,0px));border-radius:24px!important;z-index:55;box-shadow:0 24px 70px rgba(0,0,0,.23)!important}
+  #mobileMoreBackdrop{z-index:54!important}
+  .ctx{left:7px;right:7px;bottom:calc(188px + env(safe-area-inset-bottom,0px));height:min(64dvh,590px);border-radius:23px!important;z-index:42}
+  .fp{padding:9px 9px calc(10px + env(safe-area-inset-bottom,0px))}
+  .fm{gap:9px}
+  .fcv{width:min(72vw,270px);border-radius:24px 14px 28px 18px!important}
+  #vz2{height:74px}
+  .fp .btns .ic{width:34px;height:34px}.fp .btns .pp{width:46px;height:46px}
+  body.theme-graffiti .top,body.theme-graffiti .pl,body.theme-graffiti .ctx{box-shadow:5px 5px 0 #161616!important}
+  body.theme-liquid .top,body.theme-liquid .pl,body.theme-liquid .ctx{backdrop-filter:blur(28px) saturate(180%);-webkit-backdrop-filter:blur(28px) saturate(180%)}
+}
+</style>
+
 </head><body class="pz noauth"><div id="bgLayer"></div><div id="amb"></div>
+<svg id="v7Filters" aria-hidden="true" width="0" height="0" style="position:absolute;pointer-events:none">
+  <defs>
+    <filter id="paintRough" x="-20%" y="-20%" width="140%" height="140%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.018 0.055" numOctaves="2" seed="7" result="noise"/>
+      <feDisplacementMap in="SourceGraphic" in2="noise" scale="9" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+  </defs>
+</svg>
+<div id="liquidLens" aria-hidden="true"></div>
+<div id="paintField" aria-hidden="true"></div>
 <div class="auth" id="authScreen"><button class="auth-back" id="authBack" style="display:none">← Back</button><button class="auth-skip" id="authSkip" style="display:none">Skip</button><div class="auth-card glass" id="authCard"></div></div>
 <div class="app"><header class="top glass"><div class="logo"><svg width="22" height="18" viewBox="0 0 22 18" fill="currentColor" aria-hidden="true" style="margin-right:8px;vertical-align:-1px"><rect x="0" y="6" width="2.4" height="6" rx="1.2"/><rect x="4.9" y="2" width="2.4" height="14" rx="1.2"/><rect x="9.8" y="0" width="2.4" height="18" rx="1.2"/><rect x="14.7" y="4" width="2.4" height="10" rx="1.2"/><rect x="19.6" y="7" width="2.4" height="4" rx="1.2"/></svg>SONORA</div><div class="sbox"><input class="in" id="q" placeholder="Search songs, creators, albums, playlists..." aria-label="Search" autocomplete="off"><kbd id="kb">Ctrl K</kbd></div><div class="tq"><button class="btn g" data-a="nav" data-v="up">Import</button><button class="btn g" data-a="nav" data-v="mst">Master</button><button class="btn" data-a="cre">＋ Create</button><button class="ic" data-a="queue" aria-label="Queue">☰</button><button class="ic" data-a="ntf" aria-label="Notifications"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0112 0c0 7 3 9 3 9H3s3-2 3-9M10 21a2 2 0 004 0"/></svg></button><button class="ic" data-a="cx" aria-label="Toggle side panel"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M15 4v16"/></svg></button><button class="av" data-a="prf" aria-label="Profile">Y</button></div></header><nav class="side glass" aria-label="Main"><div class="sc">Main</div><button class="nv" data-a="nav" data-v="home">Home</button><button class="nv" data-a="nav" data-v="disc">Discover</button><button class="nv" data-a="nav" data-v="search">Search</button><button class="nv" data-a="nav" data-v="lib">Library</button><button class="nv" data-a="nav" data-v="liked">Liked songs</button><button class="nv" data-a="nav" data-v="rec">Recently played</button><button class="nv" data-a="nav" data-v="now">Now playing</button><div class="sc">Your music</div><button class="nv" data-a="nav" data-v="imp">Imported</button><div class="sc">Collections</div><button class="nv" data-a="nav" data-v="artists">Creators</button><div class="sc">Creator</div><button class="nv" data-a="nav" data-v="up">Import</button><button class="nv" data-a="nav" data-v="mst">Master</button><button class="nv" data-a="nav" data-v="feed">Feed</button><button class="nv" data-a="nav" data-v="events">Events</button><div class="sc">System</div><button class="nv" data-a="nav" data-v="set">Settings</button><div class="sp"></div><button class="nv hide" data-a="theme" id="th">Theme: system</button></nav><main class="main glass" id="main"></main><aside class="ctx glass" id="ctx" aria-label="Context panel"><div class="ct" id="ct" role="tablist"></div><div class="cb" id="cb"></div></aside></div>
 <div class="pl glass"><div class="inf" id="inf"></div><div class="ctr"><div class="btns"><button class="ic" data-a="shuf" id="bs" aria-label="Shuffle">⇄</button><button class="ic" data-a="prev" aria-label="Previous">⏮&#xFE0E;</button><button class="pp" data-a="pp" id="pp" aria-label="Play or pause">▶&#xFE0E;</button><button class="ic" data-a="next" aria-label="Next">⏭&#xFE0E;</button><button class="ic" data-a="rep" id="br" aria-label="Repeat">↻</button></div><div class="wv"><span id="tc">0:00</span><canvas id="cv" aria-label="Seek"></canvas><div id="waveComments" class="wave-comments" aria-hidden="false"></div><span id="td">0:00</span></div></div><div class="rg"><button class="ic" data-a="mute" id="bm" aria-label="Mute">🔈&#xFE0E;</button><input type="range" id="vol" min="0" max="100" aria-label="Volume"><button class="ic" data-a="pmenu" aria-label="Mở menu bài hát">☰</button></div></div>
@@ -1603,7 +1828,7 @@ hx6=v=>/^#[0-9a-f]{6}$/i.test(v);
 function applyBG(){const l=$('#bgLayer');if(!l)return;if(!hx6(cs.c1))cs.c1=DCS.c1;if(!hx6(cs.c2))cs.c2=DCS.c2;let b='';if(cs.bgt==='solid')b='background:'+cs.c1;else if(cs.bgt==='gradient')b=`background:linear-gradient(${+cs.ang||0}deg,${cs.c1},${cs.c2})`;else if(cs.bgt==='image'&&cs.bgi)b=`background:url("${cs.bgi}") center/cover`;else if(cs.bgt==='artwork'&&cur)b=cov(cur);l.setAttribute('style',b);l.style.display=b?'block':'none'}
 const _fu=fpUpdate;fpUpdate=function(){_fu();if(cs.bgt==='artwork')applyBG()};
 const sr=(l,k,mn,mx,dv,u,st)=>`<div class="sl"><span>${l}</span><input type="range" min="${mn}" max="${mx}" step="${st||1}" value="${cs[k]*dv}" data-cs="${k}" data-div="${dv}" data-u="${u}"><b>${cs[k]}${u}</b></div>`,
-STYLE_PRE=[['liquid','Liquid Glass'],['graffiti','Graffiti Paint'],['glassmorphism','Glassmorphism'],['neumorphism','Neumorphism'],['neobrutalism','Neobrutalism'],['flat','Flat Design'],['minimal','Minimalism'],['skeuo','Skeuomorphism'],['brutal','Brutalist'],['handdrawn','Hand-drawn'],['clay','Claymorphism'],['collage','Collage art'],['maxi','Maximalism'],['retro','Retro']],cust2=()=>`<h2>Visual style</h2><div style="display:flex;gap:8px;flex-wrap:wrap">${STYLE_PRE.map(p=>`<button class="chip${cs.style===p[0]?' on':''}" data-a="xstyle" data-v="${p[0]}">${p[1]}</button>`).join('')}</div><h2>Themes</h2><div style="display:flex;gap:8px;flex-wrap:wrap">${PRE.map((p,i)=>`<button class="chip" data-a="xpre" data-v="${i}">${p[0]}</button>`).join('')}</div><h2>Background</h2><div style="display:flex;gap:8px;flex-wrap:wrap">${[['default','Default'],['solid','Solid'],['gradient','Gradient'],['image','Image'],['artwork','Cover art']].map(x=>cc('bgt',x[0],x[1])).join('')}</div><p class="st" style="margin:12px 0 6px">Presets</p><div style="display:flex;gap:8px;flex-wrap:wrap">${BGP.map((p,i)=>`<button class="chip" data-a="xbgp" data-v="${i}">${p[0]}</button>`).join('')}</div><div class="ip" style="margin-top:12px"><input type="color" value="${hx6(cs.c1)?cs.c1:DCS.c1}" data-cc="c1" aria-label="Color 1"><input type="color" value="${hx6(cs.c2)?cs.c2:DCS.c2}" data-cc="c2" aria-label="Color 2"><button class="btn g" data-a="xpick" data-v="cbgf">Upload image</button><button class="ic" data-a="xcs" data-k="bgi" data-v="" aria-label="Remove image">✕</button></div><input type="file" accept="image/*" hidden id="cbgf" data-img="cbg"><div class="mg" style="max-width:520px">${sr('Angle','ang',0,360,1,'°')}${sr('Blur','bb',0,40,1,'px')}${sr('Brightness','bbr',30,150,100,'',1).replace('step="1"','step="1"')}${sr('Contrast','bct',50,150,100,'')}${sr('Saturation','bsa',0,200,100,'')}${sr('Opacity','bop',10,100,100,'')}${sr('Overlay','bov',0,80,100,'')}${sr('Vignette','bvg',0,90,100,'')}</div><h2>Shape and feel</h2><div class="mg" style="max-width:520px">${sr('Corner radius','rs',0,200,100,'')}${sr('Spacing','gs',40,200,100,'')}${sr('Cursor glow','cg',0,200,100,'')}${sr('Ripple','rpl',0,50,100,'')}</div><p class="st" style="margin:12px 0 6px">Heading font</p><div style="display:flex;gap:8px;flex-wrap:wrap">${['Manrope','Inter','Georgia','ui-monospace'].map(f=>cc('fh',f,f==='ui-monospace'?'Mono':f)).join('')}</div><p class="st" style="margin:12px 0 6px">Body font</p><div style="display:flex;gap:8px;flex-wrap:wrap">${['Inter','Manrope','Georgia','ui-monospace'].map(f=>cc('fb',f,f==='ui-monospace'?'Mono':f)).join('')}</div><h2>Account</h2><p class="st" style="margin-bottom:8px">${E((axSes()||{}).email||'')}</p><button class="btn g" data-a="xlogout">Sign out</button>`;
+STYLE_PRE=[['liquid','Liquid Glass · iOS'],['graffiti','Graffiti · Paint'],['glassmorphism','Glassmorphism'],['neumorphism','Neumorphism'],['neobrutalism','Neobrutalism'],['flat','Flat Design'],['minimal','Minimalism'],['skeuo','Skeuomorphism'],['brutal','Brutalist'],['handdrawn','Hand-drawn'],['clay','Claymorphism'],['collage','Collage art'],['maxi','Maximalism'],['retro','Retro']],cust2=()=>`<h2>Visual style</h2><div style="display:flex;gap:8px;flex-wrap:wrap">${STYLE_PRE.map(p=>`<button class="chip${cs.style===p[0]?' on':''}" data-a="xstyle" data-v="${p[0]}">${p[1]}</button>`).join('')}</div><h2>Themes</h2><div style="display:flex;gap:8px;flex-wrap:wrap">${PRE.map((p,i)=>`<button class="chip" data-a="xpre" data-v="${i}">${p[0]}</button>`).join('')}</div><h2>Background</h2><div style="display:flex;gap:8px;flex-wrap:wrap">${[['default','Default'],['solid','Solid'],['gradient','Gradient'],['image','Image'],['artwork','Cover art']].map(x=>cc('bgt',x[0],x[1])).join('')}</div><p class="st" style="margin:12px 0 6px">Presets</p><div style="display:flex;gap:8px;flex-wrap:wrap">${BGP.map((p,i)=>`<button class="chip" data-a="xbgp" data-v="${i}">${p[0]}</button>`).join('')}</div><div class="ip" style="margin-top:12px"><input type="color" value="${hx6(cs.c1)?cs.c1:DCS.c1}" data-cc="c1" aria-label="Color 1"><input type="color" value="${hx6(cs.c2)?cs.c2:DCS.c2}" data-cc="c2" aria-label="Color 2"><button class="btn g" data-a="xpick" data-v="cbgf">Upload image</button><button class="ic" data-a="xcs" data-k="bgi" data-v="" aria-label="Remove image">✕</button></div><input type="file" accept="image/*" hidden id="cbgf" data-img="cbg"><div class="mg" style="max-width:520px">${sr('Angle','ang',0,360,1,'°')}${sr('Blur','bb',0,40,1,'px')}${sr('Brightness','bbr',30,150,100,'',1).replace('step="1"','step="1"')}${sr('Contrast','bct',50,150,100,'')}${sr('Saturation','bsa',0,200,100,'')}${sr('Opacity','bop',10,100,100,'')}${sr('Overlay','bov',0,80,100,'')}${sr('Vignette','bvg',0,90,100,'')}</div><h2>Shape and feel</h2><div class="mg" style="max-width:520px">${sr('Corner radius','rs',0,200,100,'')}${sr('Spacing','gs',40,200,100,'')}${sr('Cursor glow','cg',0,200,100,'')}${sr('Ripple','rpl',0,50,100,'')}</div><p class="st" style="margin:12px 0 6px">Heading font</p><div style="display:flex;gap:8px;flex-wrap:wrap">${['Manrope','Inter','Georgia','ui-monospace'].map(f=>cc('fh',f,f==='ui-monospace'?'Mono':f)).join('')}</div><p class="st" style="margin:12px 0 6px">Body font</p><div style="display:flex;gap:8px;flex-wrap:wrap">${['Inter','Manrope','Georgia','ui-monospace'].map(f=>cc('fb',f,f==='ui-monospace'?'Mono':f)).join('')}</div><h2>Account</h2><p class="st" style="margin-bottom:8px">${E((axSes()||{}).email||'')}</p><button class="btn g" data-a="xlogout">Sign out</button>`;
 
 /* ---- backend boot + remote library ---- */
 /* ---- live sync engine: everything published is shared with every listener ---- */
@@ -1965,7 +2190,7 @@ afterAuth=async function(){await __afterAuthBeforeProfiles();await refreshOwnPro
 
   /* V6 design registry: users can switch to Graffiti immediately in Settings. */
   try{
-    if(Array.isArray(STYLE_PRE) && !STYLE_PRE.some(x=>x[0]==='graffiti')) STYLE_PRE.splice(1,0,['graffiti','Graffiti Paint']);
+    if(Array.isArray(STYLE_PRE) && !STYLE_PRE.some(x=>x[0]==='graffiti')) STYLE_PRE.splice(1,0,['graffiti','Graffiti · Paint']);
     const oldApplyCS=applyCS;
     applyCS=function(){
       oldApplyCS();
@@ -2082,6 +2307,55 @@ afterAuth=async function(){await __afterAuthBeforeProfiles();await refreshOwnPro
     }
   }catch(_){}}
   )();
+})();
+</script>
+
+
+<script id="sonora-v7-runtime">
+(function(){
+  const q=s=>document.querySelector(s);
+  const addPaint=()=>{
+    const host=q('#paintField'); if(!host||host.dataset.ready)return;
+    host.dataset.ready='1';
+    const colors=['#ff2d7a','#ffd400','#00d4ff','#7c4dff','#ff6a00','#20c997'];
+    const items=[
+      ['4%','10%','94px','18px','-8deg'],['11%','82%','120px','16px','10deg'],['87%','12%','105px','20px','-14deg'],['80%','76%','130px','17px','6deg'],
+      ['24%','20%','76px','13px','-22deg'],['66%','10%','88px','14px','12deg'],['3%','56%','110px','16px','-3deg'],['93%','56%','86px','13px','18deg'],
+      ['38%','92%','125px','15px','-7deg'],['72%','91%','95px','14px','11deg'],['52%','6%','62px','12px','-12deg'],['53%','78%','72px','11px','16deg'],
+      ['18%','48%','58px','10px','18deg'],['83%','37%','58px','10px','-12deg'],['31%','70%','66px','11px','8deg'],['61%','56%','74px','11px','-9deg']
+    ];
+    items.forEach((v,i)=>{const s=document.createElement('i');s.className='paint-stroke';s.style.cssText=`--x:${v[0]};--y:${v[1]};--w:${v[2]};--h:${v[3]};--r:${v[4]};--c:${colors[i%colors.length]};`;host.appendChild(s)});
+  };
+  addPaint();
+
+  /* Keep the glass optical effect cheap: never repaint content canvases. */
+  const bumpLiquid=()=>{
+    document.body.classList.toggle('v7-pointer',matchMedia('(pointer:fine)').matches);
+  };
+  bumpLiquid();addEventListener('resize',bumpLiquid,{passive:true});
+
+  /* Touch-friendly contextual menu: sheet-like but still reuses the existing menu actions. */
+  const watchMenu=()=>{
+    const m=q('.menu'); if(!m)return;
+    const mobile=matchMedia('(max-width:760px) and (pointer:coarse)').matches;
+    if(mobile){
+      m.classList.add('v7-menu-sheet');
+      m.style.left='10px';m.style.right='10px';m.style.top='auto';m.style.bottom='calc(126px + env(safe-area-inset-bottom,0px))';m.style.width='calc(100vw - 20px)';m.style.maxWidth='none';
+    }else m.classList.remove('v7-menu-sheet');
+  };
+  new MutationObserver(watchMenu).observe(document.body,{childList:true,subtree:true});
+
+  /* Hard cache reset once per tab so the browser cannot keep the old comments renderer. */
+  (async()=>{try{
+    const KEY='sonora_v7_cache_reset';
+    if(navigator.serviceWorker && !sessionStorage.getItem(KEY)){
+      sessionStorage.setItem(KEY,'1');
+      const regs=await navigator.serviceWorker.getRegistrations();
+      for(const r of regs){try{await r.unregister()}catch(_){} }
+      if(window.caches){const ks=await caches.keys();for(const k of ks){try{await caches.delete(k)}catch(_){} }}
+      location.replace(location.pathname+'?v=7&refraction=1'+location.hash);
+    }
+  }catch(_){} })();
 })();
 </script>
 
