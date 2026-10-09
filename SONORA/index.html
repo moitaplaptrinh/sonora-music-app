@@ -3284,4 +3284,61 @@ afterAuth=async function(){await __afterAuthBeforeProfiles();await refreshOwnPro
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
 })();
 </script>
+
+<!-- SONORA Waveform Position Studio -->
+<style id="sonora-wave-editor-style">
+#snWaveToggle{position:fixed;right:18px;bottom:112px;z-index:210;background:rgba(22,34,30,.87);color:#fff;border:1px solid rgba(255,255,255,.35);box-shadow:0 10px 30px #0005,inset 0 1px #fff4;backdrop-filter:blur(22px);border-radius:999px;padding:10px 15px;font:600 12px Inter,system-ui;cursor:pointer}
+#snWaveToggle[aria-pressed=true]{background:rgba(55,112,83,.95)}
+#snWavePanel{position:fixed;right:18px;bottom:160px;width:min(320px,calc(100vw - 36px));max-height:65vh;overflow:auto;z-index:211;padding:16px;border-radius:22px;background:rgba(18,28,25,.94);color:#fff;border:1px solid #ffffff40;box-shadow:0 20px 70px #0008,inset 0 1px #fff4;backdrop-filter:blur(28px);font:13px Inter,system-ui}
+#snWavePanel[hidden]{display:none!important}
+#snWavePanel h3{font:700 17px Inter,system-ui;margin:0 0 8px;color:#fff}
+#snWavePanel p{color:#c3d1c9;font-size:11px;margin:0 0 12px}
+#snWavePanel label{display:flex;justify-content:space-between;gap:10px;margin:10px 0 5px;color:#e5f6e9}
+#snWavePanel input[type=range]{display:block;width:100%;accent-color:#a6f5c5}
+#snWavePanel select{width:100%;background:#263a30;color:#fff;border:1px solid #ffffff35;padding:9px;border-radius:10px}
+#snWavePanel .sn-actions{display:flex;gap:8px;margin-top:14px}
+#snWavePanel button{flex:1;padding:9px;border-radius:12px;background:#ffffff18;color:white;border:1px solid #ffffff33;cursor:pointer}
+#snWavePanel button.sn-primary{background:#b3f3cc;color:#12231a;font-weight:700}
+body.sn-wave-edit #cv,body.sn-wave-edit #cv2,body.sn-wave-edit #vz,body.sn-wave-edit #vz2{cursor:grab!important;touch-action:none!important;outline:1px dashed #b3f3cc88;outline-offset:3px}
+body.sn-wave-edit .sn-wave-dragging{cursor:grabbing!important}
+@media(max-width:760px){#snWaveToggle{right:10px;bottom:165px}#snWavePanel{right:10px;bottom:213px}}
+</style>
+<script id="sonora-wave-editor-script">
+(()=>{'use strict';
+ const KEY='sonora-wave-position-studio-v1';
+ const targets={cv:'Thanh phát nhạc',cv2:'Full Player - tua nhạc',vz2:'Full Player - visualizer',vz:'Now Playing - visualizer'};
+ const defaults=()=>({x:0,y:0,scale:100});
+ let saved={};try{saved=JSON.parse(localStorage.getItem(KEY)||'{}')||{}}catch(_){}
+ let selected='cv',editing=false,drag=null;
+ const get=id=>({...defaults(),...(saved[id]||{})});
+ const clamp=(v,min,max)=>Math.max(min,Math.min(max,v));
+ const persist=()=>{try{localStorage.setItem(KEY,JSON.stringify(saved))}catch(_){}};
+ function apply(id){const el=document.getElementById(id);if(!el)return;const v=get(id);el.style.setProperty('transform',`translate(${v.x}px,${v.y}px) scale(${v.scale/100})`,'important');el.style.transformOrigin='center center';}
+ function applyAll(){Object.keys(targets).forEach(apply)}
+ function init(){
+ if(document.getElementById('snWaveToggle'))return;
+ const toggle=document.createElement('button');toggle.id='snWaveToggle';toggle.type='button';toggle.textContent='◫ Chỉnh sóng nhạc';toggle.setAttribute('aria-pressed','false');
+ const panel=document.createElement('section');panel.id='snWavePanel';panel.hidden=true;
+ panel.innerHTML=`<h3>Waveform Studio</h3><p>Bật chỉnh sửa, kéo trực tiếp sóng nhạc hoặc dùng thanh trượt. Tự lưu trên thiết bị.</p><select id="snWaveTarget" aria-label="Chọn sóng nhạc">${Object.entries(targets).map(([id,name])=>`<option value="${id}">${name}</option>`).join('')}</select>${[['x','Trái / phải',-300,300],['y','Lên / xuống',-160,160],['scale','Phóng to (%)',40,180]].map(([id,label,min,max])=>`<label for="snWave_${id}">${label}<output id="snWaveOut_${id}"></output></label><input type="range" id="snWave_${id}" min="${min}" max="${max}" step="1">`).join('')}<div class="sn-actions"><button type="button" id="snWaveReset">Đặt lại</button><button type="button" class="sn-primary" id="snWaveDone">Hoàn tất</button></div>`;
+ document.body.append(toggle,panel);
+ const select=panel.querySelector('#snWaveTarget');
+ function refresh(){const v=get(selected);for(const k of ['x','y','scale']){panel.querySelector('#snWave_'+k).value=v[k];panel.querySelector('#snWaveOut_'+k).textContent=v[k]+(k==='scale'?'%':'px')}}
+ function update(k,val){saved[selected]={...get(selected),[k]:val};apply(selected);persist();refresh()}
+ select.addEventListener('change',()=>{selected=select.value;refresh()});
+ for(const k of ['x','y','scale'])panel.querySelector('#snWave_'+k).addEventListener('input',e=>update(k,Number(e.target.value)));
+ function close(){editing=false;document.body.classList.remove('sn-wave-edit');toggle.setAttribute('aria-pressed','false');panel.hidden=true;toggle.textContent='◫ Chỉnh sóng nhạc'}
+ toggle.addEventListener('click',()=>{if(editing){close();return}editing=true;document.body.classList.add('sn-wave-edit');toggle.setAttribute('aria-pressed','true');toggle.textContent='✓ Đang chỉnh sóng';panel.hidden=false;refresh()});
+ panel.querySelector('#snWaveDone').addEventListener('click',close);
+ panel.querySelector('#snWaveReset').addEventListener('click',()=>{saved[selected]=defaults();apply(selected);persist();refresh()});
+ document.addEventListener('pointerdown',e=>{if(!editing)return;const el=e.target.closest?.('#cv,#cv2,#vz,#vz2');if(!el)return;selected=el.id;select.value=selected;refresh();const v=get(selected);drag={id:selected,startX:e.clientX,startY:e.clientY,x:v.x,y:v.y,pointerId:e.pointerId};el.classList.add('sn-wave-dragging');try{el.setPointerCapture(e.pointerId)}catch(_){ }e.preventDefault();e.stopPropagation()},true);
+ document.addEventListener('pointermove',e=>{if(!drag||e.pointerId!==drag.pointerId)return;const id=drag.id;saved[id]={...get(id),x:clamp(Math.round(drag.x+e.clientX-drag.startX),-300,300),y:clamp(Math.round(drag.y+e.clientY-drag.startY),-160,160)};apply(id);refresh();e.preventDefault()},true);
+ function end(e){if(!drag||e.pointerId!==drag.pointerId)return;document.getElementById(drag.id)?.classList.remove('sn-wave-dragging');drag=null;persist()}
+ document.addEventListener('pointerup',end,true);document.addEventListener('pointercancel',end,true);
+ document.addEventListener('click',e=>{if(editing&&e.target.closest?.('#cv,#cv2,#vz,#vz2')){e.preventDefault();e.stopImmediatePropagation()}},true);
+ const observer=new MutationObserver(()=>{applyAll()});observer.observe(document.body,{subtree:true,childList:true});
+ applyAll();refresh();
+ }
+ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
+})();
+</script>
 </body></html>
