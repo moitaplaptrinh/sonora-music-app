@@ -1,0 +1,23 @@
+@echo off
+setlocal
+cd /d "%~dp0"
+title SONORA - Complete App
+where py >nul 2>nul
+if not errorlevel 1 (
+  py -3 server.py --open
+  goto end
+)
+where python >nul 2>nul
+if not errorlevel 1 (
+  python server.py --open
+  goto end
+)
+echo.
+echo Can cai Python 3.10 hoac moi hon mot lan de chay SONORA.
+echo Tai tai https://www.python.org/downloads/
+echo Khi cai, chon "Add Python to PATH".
+echo Sau do mo lai START-WINDOWS.cmd.
+:end
+echo.
+echo SONORA da dung. Xem thong bao ben tren neu ung dung khong mo duoc.
+pause
