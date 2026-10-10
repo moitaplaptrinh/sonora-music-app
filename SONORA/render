@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: sonora
+    runtime: docker
+    plan: 0.5c-512mb
+    healthCheckPath: /api/health
+    envVars:
+      - key: SONORA_DATA_DIR
+        value: /var/data
+      - key: COOKIE_SECURE
+        value: "1"
+    disk:
+      name: sonora-data
+      mountPath: /var/data
+      sizeGB: 1
