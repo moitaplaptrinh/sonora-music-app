@@ -7,6 +7,14 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parent
+# SONORA_PWA_V10: files needed for installable PWA support.
+PWA_FILES = {
+    '/manifest.webmanifest': ('manifest.webmanifest', 'application/manifest+json; charset=utf-8'),
+    '/sw.js': ('sw.js', 'application/javascript; charset=utf-8'),
+    '/icon-192.png': ('icon-192.png', 'image/png'),
+    '/icon-512.png': ('icon-512.png', 'image/png'),
+    '/icon-maskable-512.png': ('icon-maskable-512.png', 'image/png'),
+}
 DATA_DIR = Path(os.environ.get('SONORA_DATA_DIR', str(ROOT / 'data'))).resolve()
 UPLOAD_DIR = DATA_DIR / 'uploads'
 DB_PATH = DATA_DIR / 'sonora.db'
@@ -609,6 +617,7 @@ class H(BaseHTTPRequestHandler):
     def route(self,method):
         p=urllib.parse.urlparse(self.path); path=p.path; q=urllib.parse.parse_qs(p.query)
         if path in ('/','/index.html') and method in ('GET','HEAD'): return self.serve_file(find_index(), head=(method=='HEAD'))
+        if path in PWA_FILES and method in ('GET','HEAD'): return self.serve_pwa(path, head=(method=='HEAD'))
         if path=='/favicon.ico': return self.text(204,'')
         if path=='/api/health': return self.json(200,{'ok':True,'service':'sonora','time':now_iso(),'googleOAuthConfigured':oauth_configured()},{'Access-Control-Allow-Origin':'*'})
         if path=='/api/sync' and method=='GET': return self.sync_poll(q)
@@ -681,6 +690,24 @@ class H(BaseHTTPRequestHandler):
             if not name.startswith(('cov_','avatar_','pbg_')): return self.text(404,'Not found')  # audio is only served via /api/tracks/<id>/stream
             return self.serve_file(UPLOAD_DIR/name)
         self.serve_file(find_index()) if not path.startswith('/api/') else self.json(404,{'error':'Not found'})
+
+    def serve_pwa(self,path,head=False):
+        # Serve the manifest and service worker with explicit MIME types.
+        name, ctype = PWA_FILES[path]
+        asset = ROOT / name
+        if not asset.is_file():
+            return self.text(404, 'PWA asset not found: ' + name)
+        raw = asset.read_bytes()
+        self.send_response(200)
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(len(raw)))
+        self.send_header('Cache-Control', 'no-cache' if path in ('/sw.js','/manifest.webmanifest') else 'public, max-age=604800, immutable')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        if path == '/sw.js':
+            self.send_header('Service-Worker-Allowed', '/')
+        self.end_headers()
+        if not head:
+            self.wfile.write(raw)
 
     def serve_file(self,path,head=False):
         if not path.exists() or not path.is_file(): return self.text(404,'Not found')
